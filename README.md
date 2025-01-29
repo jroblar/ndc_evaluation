@@ -13,7 +13,7 @@ Queremos construir un modelo econométrico/predictivo para evaluar el impacto de
 ---
 ## **Pasos a Seguir**
 
-### **1. Breve Revision de Literaturea**
+### **1. Breve Revision de Literatura**
 
 **Tareas:**
 
