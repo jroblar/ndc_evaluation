@@ -1,0 +1,69 @@
+topic,topic_theme_14_refined
+"Transport,Buildings",Buildings
+Buildings,Buildings
+,Cross-cutting / Economy-wide
+Economy-wide,Cross-cutting / Economy-wide
+Fuels,Cross-cutting / Economy-wide
+"Transport,Buildings,Power",Energy
+"Fuels,Power",Energy
+"Fuels,Buildings,Power",Energy
+Power,Energy
+"Buildings,Power",Energy
+"Transport,Power",Energy
+"Fuels,Transport,Power",Energy
+"Economy-wide,Power",Energy
+Methane abatement,Fossil Fuels
+"Transport,Industry",Industry
+"Fuels,Industry",Industry
+"Transport,Industry,Power",Industry
+"Buildings,Industry,Power",Industry
+"Industry,Power",Industry
+"Industry,Power,Methane abatement",Industry
+"Transport,Buildings,Industry",Industry
+"Industry,Methane abatement",Industry
+"Fuels,Buildings,Industry,Power",Industry
+"Transport,Buildings,Industry,Power",Industry
+"Transport,Buildings,Industry,Power,Methane abatement",Industry
+"Buildings,Industry",Industry
+Industry,Industry
+"Power,Critical Minerals",Raw Materials
+"Transport,Power,Critical Minerals",Raw Materials
+"Transport,Critical Minerals",Raw Materials
+"Critical Minerals,Methane abatement",Raw Materials
+Critical Minerals,Raw Materials
+"Industry,Critical Minerals",Raw Materials
+"Fuels,Critical Minerals",Raw Materials
+"People-Centred Clean Energy Transitions,Buildings",Social & Equity
+"Just transitions,Fuels,Industry,Power",Social & Equity
+Just transitions,Social & Equity
+"People-Centred Clean Energy Transitions,Fuels,Industry,Power",Social & Equity
+"Economy-wide,People-Centred Clean Energy Transitions",Social & Equity
+People-Centred Clean Energy Transitions,Social & Equity
+"Economy-wide,Just transitions",Social & Equity
+"Just transitions,Buildings",Social & Equity
+"People-Centred Clean Energy Transitions,Fuels",Social & Equity
+"Just transitions,People-Centred Clean Energy Transitions",Social & Equity
+"Just transitions,Industry",Social & Equity
+"Technology R&D and innovation,Transport",Technology & R&D
+Technology R&D and innovation,Technology & R&D
+"Technology R&D and innovation,Power",Technology & R&D
+"Fuels and technology innovation,Methane abatement",Technology & R&D
+"Fuels and technology innovation,Fuels,Critical Minerals",Technology & R&D
+"Technology R&D and innovation,Transport,Power",Technology & R&D
+"Fuels and technology innovation,Fuels,Transport,Power",Technology & R&D
+"Technology R&D and innovation,Methane abatement",Technology & R&D
+"Fuels and technology innovation,Fuels,Industry",Technology & R&D
+"Fuels and technology innovation,Fuels,Power",Technology & R&D
+"Fuels and technology innovation,Critical Minerals",Technology & R&D
+"Economy-wide,Fuels and technology innovation,Fuels,Transport,Power",Technology & R&D
+"Fuels and technology innovation,Buildings",Technology & R&D
+Fuels and technology innovation,Technology & R&D
+"Fuels and technology innovation,Transport",Technology & R&D
+"Fuels and technology innovation,Industry",Technology & R&D
+"Fuels and technology innovation,Power",Technology & R&D
+"Technology R&D and innovation,Fuels",Technology & R&D
+"Fuels and technology innovation,Fuels",Technology & R&D
+"Fuels and technology innovation,Buildings,Industry",Technology & R&D
+"Fuels and technology innovation,Power,Critical Minerals",Technology & R&D
+"Fuels,Transport",Transport
+Transport,Transport
