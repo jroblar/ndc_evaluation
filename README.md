@@ -1,5 +1,12 @@
 # **Plan de Proyecto: Climate Policy Impact Analyzer (CPIA)**  
 
+
+## Getting Started
+
+TODO
+
+
+
 ## **Definición del Problema**  
 Queremos construir un modelo econométrico/predictivo para evaluar el impacto de las políticas climáticas en la reducción de emisiones de gases de efecto invernadero a nivel país.  
 
