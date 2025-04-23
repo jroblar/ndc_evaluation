@@ -1,4 +1,4 @@
-iso3,year,avg_score,policy_count,dominant_topic,dominant_category,CPSI
+iso_alpha_3,year,avg_score,policy_count,dominant_topic,dominant_category,CPSI
 AFG,1971,0.75,1,Energy,Solar Power,0.5198603854199589
 AFG,1972,0.75,1,Energy,Solar Power,0.5198603854199589
 AFG,1973,0.75,1,Energy,Solar Power,0.5198603854199589
