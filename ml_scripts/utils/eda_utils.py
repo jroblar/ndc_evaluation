@@ -15,7 +15,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.base import clone
 import shap
 from sklearn.ensemble import RandomForestRegressor
-
+import logging
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 
@@ -135,19 +135,29 @@ class PolicyEDA:
         plt.show()
     
 
+# Configure the logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
 class RegressionUtils:
     """
     Utilities for regression modeling and analysis.
     """
 
     @staticmethod
-    def filter_high_collinear_features(df, features, collinearity_threshold=0.9):
+    def filter_high_collinear_features(df, features, collinearity_threshold=0.9, verbose=False):
         corr_matrix = df[features].corr().abs()
         upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
         to_drop = [col for col in upper_tri.columns if any(upper_tri[col] > collinearity_threshold)]
         reduced_features = [f for f in features if f not in to_drop]
-        print(f"Features dropped due to collinearity: {to_drop}")
-        print(f"Reduced feature set: {reduced_features}")
+        if verbose:
+            logger.info(f"Features dropped due to collinearity: {to_drop}")
+            logger.info(f"Reduced feature set: {reduced_features}")
         return reduced_features
 
     @staticmethod
@@ -158,19 +168,19 @@ class RegressionUtils:
         ])
 
     @staticmethod
-    def _evaluate_model(pipe, X_test, y_test, feature_names):
+    def _evaluate_model(pipe, X_test, y_test, feature_names, verbose=False):
         y_pred = pipe.predict(X_test)
         mse = mean_squared_error(y_test, y_pred)
         rmse = math.sqrt(mse)
         r2 = r2_score(y_test, y_pred)
-        print(f"RMSE: {rmse:.4f}, R²: {r2:.4f}")
         coefs = pd.Series(pipe.named_steps['regressor'].coef_, index=feature_names)
-        print("\nCoefficients:")
-        print(coefs.sort_values(ascending=False))
+        if verbose:
+            logger.info(f"RMSE: {rmse:.4f}, R²: {r2:.4f}")
+            logger.info("\nCoefficients:\n%s", coefs.sort_values(ascending=False).to_string())
         return rmse, r2, coefs
 
     @staticmethod
-    def train_model(df, features, target, regressor, plot_pdp_feature=None, test_size=0.2, random_state=42):
+    def train_model(df, features, target, regressor, plot_pdp_feature=None, test_size=0.2, random_state=42, verbose=False):
         X = df[features]
         y = df[target]
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state)
@@ -178,8 +188,9 @@ class RegressionUtils:
         pipe = RegressionUtils._build_pipeline(regressor)
         pipe.fit(X_train, y_train)
 
-        print(f"\nModel: {regressor.__class__.__name__}")
-        rmse, r2, coefs = RegressionUtils._evaluate_model(pipe, X_test, y_test, features)
+        if verbose:
+            logger.info(f"\nModel: {regressor.__class__.__name__}")
+        rmse, r2, coefs = RegressionUtils._evaluate_model(pipe, X_test, y_test, features, verbose=verbose)
 
         if plot_pdp_feature:
             fig, ax = plt.subplots(figsize=(8, 6))
@@ -191,12 +202,19 @@ class RegressionUtils:
             plt.tight_layout()
             plt.show()
 
-        return pipe, coefs
+        results = {
+            'rmse': rmse,
+            'r2': r2,
+            'coefs': coefs,
+            'model': pipe
+        }
 
-class RegressionUtils:
+        return results
+
+class ShapUtils:
 
     @classmethod
-    def analyze_feature_importance_with_shap(cls, df, features, target, plot_feature=None, n_estimators=100, random_state=42):
+    def analyze_feature_importance_with_shap(cls, df, features, target, country, plot_feature=None, n_estimators=100, random_state=42):
         """
         Trains a RandomForestRegressor and visualizes SHAP values for feature importance.
 
@@ -204,6 +222,7 @@ class RegressionUtils:
             df (pd.DataFrame): Dataset
             features (list): List of feature column names
             target (str): Name of target column
+            country (str): Country name for plot titles
             plot_feature (str, optional): If specified, a SHAP scatter plot for this feature will be shown
             n_estimators (int): Number of trees in the forest
             random_state (int): Seed for reproducibility
@@ -211,15 +230,36 @@ class RegressionUtils:
         X = df[features]
         y = df[target]
 
-        model = RandomForestRegressor(n_estimators=n_estimators, random_state=random_state, n_jobs=-1)
-        model.fit(X, y)
+        try:
+            model = RandomForestRegressor(n_estimators=n_estimators, random_state=random_state, n_jobs=-1)
+            model.fit(X, y)
 
-        explainer = shap.Explainer(model, X)
-        shap_values = explainer(X)
+            # SHAP values
+            explainer = shap.Explainer(model, X)
+            shap_values = explainer(X)
 
-        print("SHAP Beeswarm (global feature importance):")
-        shap.plots.beeswarm(shap_values)
+        except Exception as e:
+            logger.error(f"Error for country {country}: {e}")
+            return
 
+        # SHAP Beeswarm
+        print(f"SHAP Beeswarm (Global Feature Importance) - {country}")
+        shap.plots.beeswarm(shap_values, show=False)
+        plt.title(f"SHAP Beeswarm - {country}")
+        plt.tight_layout()
+        plt.show()
+
+        # Feature Importance Plot
+        importances = pd.Series(model.feature_importances_, index=features).sort_values(ascending=True)
+        importances.plot(kind='barh', title=f"Feature Importances - {country}")
+        plt.xlabel("Importance")
+        plt.tight_layout()
+        plt.show()
+
+        # SHAP scatter for selected feature
         if plot_feature:
-            print(f"\nSHAP Scatter for feature: {plot_feature}")
-            shap.plots.scatter(shap_values[:, plot_feature])
+            print(f"\nSHAP Scatter for feature: {plot_feature} - {country}")
+            shap.plots.scatter(shap_values[:, plot_feature], show=False)
+            plt.title(f"SHAP Scatter for {plot_feature} - {country}")
+            plt.tight_layout()
+            plt.show()
