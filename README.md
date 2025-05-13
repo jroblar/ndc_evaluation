@@ -1,83 +1,51 @@
-# **Plan de Proyecto: Climate Policy Impact Analyzer (CPIA)**  
+# Climate Policy Impact Analyzer (CPIA)
 
+## Objectives
+
+* Build a causal inference model to explore the impact of policies on CO₂e emissions mitigation.
+* Develop a predictive model to estimate how likely a country is to meet its target emissions in a specific future year, based on its policies, historical emission trends, and other socio-economic indicators.
 
 ## Getting Started
 
-TODO
+### Create the environment:
 
+```bash
+conda create -n cpia_env python=3.11
+conda activate cpia_env
+```
 
+### Install dependencies:
 
-## **Definición del Problema**  
-Queremos construir un modelo econométrico/predictivo para evaluar el impacto de las políticas climáticas en la reducción de emisiones de gases de efecto invernadero a nivel país.  
+Inside the project folder, run:
 
-**Objetivos específicos:**  
-1. **Construcción del dataset:** Integrar datos de emisiones, políticas climáticas y variables económicas/demográficas de cada país.  
-2. **Desarrollo de un índice de rigurosidad en políticas climáticas:** Basado en metodologías como la del Oxford COVID-19 Government Response Tracker.  
-3. **Modelado econométrico/predictivo:** Estimar el efecto de las políticas climáticas en la reducción de emisiones.  
-4. **Evaluación de umbrales y robustez:** Analizar si existe un nivel de intensidad de políticas necesario para que las emisiones disminuyan significativamente.  
-5. **Predicciones:** Determinar la probabilidad de que un país reduzca sus emisiones en un X% en un año determinado.  
+```bash
+pip install -r requirements.txt
+```
 
----
-## **Pasos a Seguir**
+## Important Files
 
-### **1. Breve Revision de Literatura**
+* The `data/processed_data` folder contains processed datasets for:
 
-**Tareas:**
+  * Policies and the policy index
+  * Historical emissions data
+  * World Bank socio-economic indicators
 
-✅ Revisar en la literatura proyectos similares.  
-✅ Encontrar que variables son necesarias para poder construir nuestro modelo.  
+  **Files:**
 
----
+  * `IEA_policies_clean.csv`
+  * `IEA_scored_cpsi.csv`
+  * `total_emissions_df.csv`
+  * `wb_control_vars.csv`
 
-### **2. Recopilación de Datos**  
-| **Fuente** | **Descripción** | **Enlace** |  
-|------------|---------------|------------|  
-| **Base de emisiones** | Datos históricos de emisiones de cada país | [Descargar](https://1drv.ms/u/s!AqjkGBjI6COCjbw91Mc0ff1Ad4bwjw?e=PpuuWb) |  
-| **Base de políticas climáticas** | Políticas ambientales implementadas en cada país | [IEA](https://www.iea.org/policies) |  
-| **Datos socioeconómicos** | Variables macroeconómicas y demográficas de cada país | [World Bank](https://data.worldbank.org/) |  
+* The `data/data_processing_scripts` folder contains notebooks used to generate the World Bank control datasets and the IEA policy dataset.
 
-**Tareas:**  
-✅ Limpiar y unificar formatos de datos.  
-✅ Completar valores faltantes con imputaciones razonables.  
-✅ Construir un índice de rigurosidad en políticas climáticas.  
+  **Files:**
 
----
+  * `IEA_eda.ipynb`
+  * `wb_controls_v2.ipynb`
 
-### **3. Construcción del Índice de Rigurosidad en Políticas Climáticas**  
-**Referencia:** [Oxford COVID-19 Policy Tracker](https://github.com/OxCGRT/covid-policy-tracker/blob/master/documentation/index_methodology.md)  
+* The `index/` folder contains files to create the Climate Policy Stringency Index (CPSI) out of `IEA_policies_clean.csv`.
 
-**Pasos:**  
-1. **Clasificación de políticas:** Agrupar políticas climáticas en categorías clave (subsidios, impuestos, regulación, incentivos, etc.).  
-2. **Ponderación:** Asignar pesos a cada política según su potencial impacto en la reducción de emisiones.  
-3. **Normalización:** Crear un índice de 0 a 100, donde 100 representa la máxima rigurosidad en políticas.  
-4. **Validación:** Comparar el índice con estudios previos sobre efectividad de políticas climáticas.  
+  **Files:**
 
----
-
-### **4. Modelado Econométrico y Predictivo**  
-**Modelos candidatos:**  
-- **Regresión lineal múltiple**: Para analizar el efecto individual de cada política.  
-- **Regresión con variables instrumentales**: Para abordar endogeneidad en la relación política-emisiones.  
-- **Modelos de Machine Learning (XGBoost, Random Forest, Deep Learning)**: Para mejorar predicciones.  
-
-✅ Evaluaremos la relación entre políticas y emisiones con regresiones básicas.  
-✅ Introduciremos efectos de umbrales con modelos no lineales.  
-✅ Implementaremos técnicas de robustez como bootstrap y cross-validation.  
-
----
-
-### **5. Evaluación de Resultados y Predicciones**  
-**Preguntas clave a responder:**  
-🔹 ¿Qué políticas han demostrado ser más efectivas?  
-🔹 ¿Existe un umbral mínimo de rigurosidad en políticas para ver efectos significativos?  
-🔹 ¿Cómo varía la efectividad de las políticas entre países?  
-🔹 ¿Qué tan confiables son nuestras predicciones?  
-
----
-
-### **6. Implementación y Visualización**  
-✅ Creación de un dashboard interactivo con visualización de tendencias.  
-✅ Predicciones sobre reducción de emisiones en distintos escenarios de políticas.  
-✅ Paper final con hallazgos clave y recomendaciones de política.  
-
----
+  * `cpsi_index_final.ipynb`: Make sure to review this notebook since it has some modifications on how to create an explore different types of index.
