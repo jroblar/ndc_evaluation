@@ -452,12 +452,41 @@ class EmissionsDataProcessor:
         self.interpretability_key = {}
 
     def generate_lags(self, columns, max_lag=3):
+        """
+        Generates lagged features for specified columns in the DataFrame.
+
+        For each column in `columns`, creates new columns with lagged values up to `max_lag` periods,
+        grouped by the 'iso_alpha_3' column. The new columns are named in the format '{column}_lag{lag}'.
+
+        Parameters:
+            columns (list of str): List of column names to generate lagged features for.
+            max_lag (int, optional): Maximum number of lag periods to generate. Defaults to 3.
+
+        Returns:
+            self: Returns the instance with updated DataFrame containing lagged features.
+        """
         for col in columns:
             for lag in range(1, max_lag + 1):
                 self.df[f"{col}_lag{lag}"] = self.df.groupby("iso_alpha_3")[col].shift(lag)
         return self
 
     def log_transform(self, columns):
+        """
+        Applies a natural logarithm transformation to specified columns in the DataFrame.
+
+        For each column in `columns`, creates a new column prefixed with 'log_' containing the natural log of the original values.
+        Raises a ValueError if any value in a column is non-positive, as the logarithm is undefined for such values.
+        Also updates the `interpretability_key` dictionary to map the new column name to a human-readable description.
+
+        Parameters:
+            columns (list of str): List of column names in the DataFrame to apply the log transformation to.
+
+        Returns:
+            self: The instance with updated DataFrame and interpretability key.
+
+        Raises:
+            ValueError: If any value in the specified columns is less than or equal to zero.
+        """
         for col in columns:
             if (self.df[col] <= 0).any():
                 raise ValueError(f"Column {col} contains non-positive values, cannot log transform.")
@@ -467,6 +496,23 @@ class EmissionsDataProcessor:
         return self
 
     def difference_columns(self, columns, log_first=False):
+        """
+        Calculates the year-on-year difference or log-difference for specified columns, grouped by 'iso_alpha_3'.
+
+        Parameters:
+            columns (list of str): List of column names to compute differences for.
+            log_first (bool, optional): If True, computes the difference of the logarithm of each column (log-difference).
+                                        If False, computes the simple difference. Default is False.
+
+        Returns:
+            self: Returns the instance with new difference columns added to self.df and interpretability_key updated.
+
+        Notes:
+            - For each column, a new column is added to self.df:
+                - If log_first is True: 'dlog_{col}' = difference of log values (approximate annual % growth).
+                - If log_first is False: 'diff_{col}' = simple year-on-year difference.
+            - Updates self.interpretability_key with a human-readable explanation for each new column.
+        """
         for col in columns:
             target_col = f"log_{col}" if log_first else col
             new_col = f"{'dlog_' if log_first else 'diff_'}{col}"
@@ -488,42 +534,189 @@ class EmissionsDataProcessor:
         return self
 
     def plot_series(self, variable, countries, transformed=True):
+        """
+        Plots time series data for a specified variable across multiple countries.
+
+        Parameters:
+            variable (str): The name of the variable/column to plot.
+            countries (list of str): List of country ISO alpha-3 codes to plot data for.
+            transformed (bool, optional): If True, plots each transformation of the variable
+                ('raw', 'log', 'diff', 'dlog') in its own subplot. If False, plots only the raw variable.
+                Defaults to True.
+
+        Returns:
+            self: Returns the instance of the class for method chaining.
+        """
         for country in countries:
             subset = self.df[self.df["iso_alpha_3"] == country]
-            plt.figure(figsize=(10, 5))
             if transformed:
-                for kind in ['raw', 'log', 'diff', 'dlog']:
+                kinds = ['raw', 'log', 'diff', 'dlog', 'diff_dlog']
+                available_cols = []
+                for kind in kinds:
                     col = f"{kind}_{variable}" if kind != 'raw' else variable
                     if col in subset.columns:
-                        plt.plot(subset['year'], subset[col], label=kind)
+                        available_cols.append((kind, col))
+
+                n = len(available_cols)
+                if n == 0:
+                    continue
+
+                fig, axs = plt.subplots(n, 1, figsize=(10, 4 * n), sharex=True)
+                if n == 1:
+                    axs = [axs]  # wrap single axis in list
+
+                for ax, (kind, col) in zip(axs, available_cols):
+                    ax.plot(subset['year'], subset[col])
+                    ax.set_title(f"{kind.upper()} of {variable} - {country}")
+                    ax.set_ylabel(kind)
+                    ax.grid(True)
+                axs[-1].set_xlabel("Year")
+                plt.tight_layout()
+                plt.show()
             else:
+                plt.figure(figsize=(10, 5))
                 plt.plot(subset['year'], subset[variable], label='raw')
-            plt.title(f"{variable} - {country}")
-            plt.xlabel("Year")
-            plt.legend()
-            plt.grid(True)
-            plt.show()
+                plt.title(f"{variable} - {country}")
+                plt.xlabel("Year")
+                plt.ylabel(variable)
+                plt.grid(True)
+                plt.legend()
+                plt.show()
         return self
 
-    def adf_kpss_test(self, variable, countries):
-        results = {}
+    def adf_kpss_test(self, variable, countries, transformed=False):
+        """
+        Performs Augmented Dickey-Fuller (ADF) and KPSS stationarity tests on a specified variable,
+        optionally across its transformed versions.
+
+        Parameters:
+            variable (str): The name of the base column/variable to test for stationarity.
+            countries (list of str): List of country ISO alpha-3 codes to include in the test.
+            transformed (bool): If True, runs tests on all available transformed versions of the variable.
+                                If False, runs only on the raw variable.
+
+        Returns:
+            pd.DataFrame: Multi-indexed (country, transformation) DataFrame containing:
+                - "ADF Statistic"
+                - "ADF p-value"
+                - "KPSS Statistic"
+                - "KPSS p-value"
+                - "passed_ADF"  (True if ADF p < 0.05)
+                - "passed_KPSS" (True if KPSS p ≥ 0.05)
+
+        Notes:
+            - Skips countries or transformations with entirely NaN data.
+            - If KPSS test fails, assigns NaN to its results.
+        """
+        results = []
+
+        transformations = {
+            'raw': variable,
+            'log': f'log_{variable}',
+            'diff': f'diff_{variable}',
+            'dlog': f'dlog_{variable}',
+            'diff_dlog': f'diff_dlog_{variable}'
+        }
+
+        if not transformed:
+            transformations = {'raw': variable}
+
         for country in countries:
             subset = self.df[self.df["iso_alpha_3"] == country]
-            if subset[variable].isna().all():
-                continue
-            series = subset[variable].dropna()
-            adf_result = adfuller(series)
-            try:
-                kpss_result = kpss(series, nlags='auto')
-            except Exception as e:
-                kpss_result = [np.nan]*4  # fallback
-            results[country] = {
-                "ADF Statistic": adf_result[0],
-                "ADF p-value": adf_result[1],
-                "KPSS Statistic": kpss_result[0],
-                "KPSS p-value": kpss_result[1]
-            }
-        return pd.DataFrame(results).T
+
+            for label, col in transformations.items():
+                if col not in subset.columns or subset[col].isna().all():
+                    continue
+
+                series = subset[col].dropna()
+
+                try:
+                    adf_result = adfuller(series)
+                    adf_stat, adf_p = adf_result[0], adf_result[1]
+                except Exception:
+                    adf_stat, adf_p = np.nan, np.nan
+
+                try:
+                    kpss_result = kpss(series, nlags='auto')
+                    kpss_stat, kpss_p = kpss_result[0], kpss_result[1]
+                except Exception:
+                    kpss_stat, kpss_p = np.nan, np.nan
+
+                passed_adf = adf_p < 0.05 if not np.isnan(adf_p) else np.nan
+                passed_kpss = kpss_p >= 0.05 if not np.isnan(kpss_p) else np.nan
+
+                results.append({
+                    'country': country,
+                    'transformation': label,
+                    'ADF Statistic': adf_stat,
+                    'ADF p-value': adf_p,
+                    'KPSS Statistic': kpss_stat,
+                    'KPSS p-value': kpss_p,
+                    'passed_ADF': passed_adf,
+                    'passed_KPSS': passed_kpss
+                })
+
+        return pd.DataFrame(results).set_index(['country', 'transformation'])
+    
+    def adf_kpss_test_summary(self, variable, countries):
+        """
+        Produces a summary DataFrame of ADF and KPSS p-values and pass/fail flags
+        for multiple transformations of a specified variable across countries.
+
+        Parameters:
+            variable (str): Base variable name (e.g., 'gdp_2015_usd').
+            countries (list of str): List of ISO alpha-3 codes to process.
+
+        Returns:
+            pd.DataFrame: One row per country with columns:
+                - ADF p-value [raw, log, dlog, diff_dlog]
+                - KPSS p-value [raw, log, dlog, diff_dlog]
+                - passed_ADF_*
+                - passed_KPSS_*
+        """
+        result_rows = []
+
+        # Define column names for transformations
+        col_map = {
+            'raw': variable,
+            'log': f'log_{variable}',
+            'dlog': f'dlog_{variable}',
+            'diff_dlog': f'diff_dlog_{variable}'
+        }
+
+        for country in countries:
+            row = {'iso_alpha_3': country}
+            subset = self.df[self.df["iso_alpha_3"] == country]
+
+            for label, col in col_map.items():
+                adf_p, kpss_p = np.nan, np.nan
+
+                if col in subset.columns and not subset[col].isna().all():
+                    series = subset[col].dropna()
+
+                    # ADF
+                    try:
+                        adf_p = adfuller(series)[1]
+                    except Exception:
+                        pass
+
+                    # KPSS
+                    try:
+                        kpss_p = kpss(series, nlags='auto')[1]
+                    except Exception:
+                        pass
+
+                # Add p-values
+                row[f'ADF p-value {label}'] = adf_p
+                row[f'KPSS p-value {label}'] = kpss_p
+
+                # Add pass/fail flags
+                row[f'passed_ADF_{label}'] = adf_p < 0.05 if not np.isnan(adf_p) else np.nan
+                row[f'passed_KPSS_{label}'] = kpss_p >= 0.05 if not np.isnan(kpss_p) else np.nan
+
+            result_rows.append(row)
+
+        return pd.DataFrame(result_rows)
 
     def get_interpretability_key(self):
         return self.interpretability_key.copy()
