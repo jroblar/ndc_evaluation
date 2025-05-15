@@ -246,6 +246,18 @@ class PolicyEDA:
         plt.suptitle(f"Pairplot for {iso3 if iso3 else 'all countries'}", y=1.02)
         plt.show()
     
+    @staticmethod
+    def get_oecd_iso_codes():
+        """
+        Returns a list of ISO Alpha-3 codes for OECD countries.
+        """
+        oecd_iso_codes = [
+            "AUS", "AUT", "BEL", "CAN", "CHL", "COL", "CZE", "DNK", "EST", "FIN",
+            "FRA", "DEU", "GRC", "HUN", "ISL", "IRL", "ISR", "ITA", "JPN", "KOR",
+            "LVA", "LTU", "LUX", "MEX", "NLD", "NZL", "NOR", "POL", "PRT", "SVK",
+            "SVN", "ESP", "SWE", "CHE", "TUR", "GBR", "USA"
+        ]
+        return oecd_iso_codes
 
 
 class RegressionUtils:
