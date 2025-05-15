@@ -13,6 +13,7 @@ from sklearn.ensemble import RandomForestRegressor
 import shap
 from sklearn.ensemble import RandomForestRegressor
 import logging
+from statsmodels.tsa.stattools import adfuller, kpss
 
 
 # Configure the logger
@@ -442,3 +443,91 @@ class ShapUtils:
             plt.title(f"SHAP Scatter for {plot_feature} - {country}")
             plt.tight_layout()
             plt.show()
+
+
+class EmissionsDataProcessor:
+    def __init__(self, df: pd.DataFrame):
+        self.df = df.copy()
+        self.country_info_df = None
+        self.interpretability_key = {}
+
+    def generate_lags(self, columns, max_lag=3):
+        for col in columns:
+            for lag in range(1, max_lag + 1):
+                self.df[f"{col}_lag{lag}"] = self.df.groupby("iso_alpha_3")[col].shift(lag)
+        return self
+
+    def log_transform(self, columns):
+        for col in columns:
+            if (self.df[col] <= 0).any():
+                raise ValueError(f"Column {col} contains non-positive values, cannot log transform.")
+            new_col = f"log_{col}"
+            self.df[new_col] = np.log(self.df[col])
+            self.interpretability_key[new_col] = f"Natural log of {col}"
+        return self
+
+    def difference_columns(self, columns, log_first=False):
+        for col in columns:
+            target_col = f"log_{col}" if log_first else col
+            new_col = f"{'dlog_' if log_first else 'diff_'}{col}"
+            self.df[new_col] = self.df.groupby("iso_alpha_3")[target_col].diff()
+            if log_first:
+                self.interpretability_key[new_col] = f"Δ ln({col}) ≈ annual % growth"
+            else:
+                self.interpretability_key[new_col] = f"Δ {col} = year-on-year change"
+        return self
+
+    def load_country_fixed_info(self, fixed_info_df: pd.DataFrame):
+        self.country_info_df = fixed_info_df.copy()
+        return self
+
+    def merge_country_fixed_info(self):
+        if self.country_info_df is None:
+            raise ValueError("Country-level fixed information not loaded.")
+        self.df = pd.merge(self.df, self.country_info_df, on="iso_alpha_3", how="left")
+        return self
+
+    def plot_series(self, variable, countries, transformed=True):
+        for country in countries:
+            subset = self.df[self.df["iso_alpha_3"] == country]
+            plt.figure(figsize=(10, 5))
+            if transformed:
+                for kind in ['raw', 'log', 'diff', 'dlog']:
+                    col = f"{kind}_{variable}" if kind != 'raw' else variable
+                    if col in subset.columns:
+                        plt.plot(subset['year'], subset[col], label=kind)
+            else:
+                plt.plot(subset['year'], subset[variable], label='raw')
+            plt.title(f"{variable} - {country}")
+            plt.xlabel("Year")
+            plt.legend()
+            plt.grid(True)
+            plt.show()
+        return self
+
+    def adf_kpss_test(self, variable, countries):
+        results = {}
+        for country in countries:
+            subset = self.df[self.df["iso_alpha_3"] == country]
+            if subset[variable].isna().all():
+                continue
+            series = subset[variable].dropna()
+            adf_result = adfuller(series)
+            try:
+                kpss_result = kpss(series, nlags='auto')
+            except Exception as e:
+                kpss_result = [np.nan]*4  # fallback
+            results[country] = {
+                "ADF Statistic": adf_result[0],
+                "ADF p-value": adf_result[1],
+                "KPSS Statistic": kpss_result[0],
+                "KPSS p-value": kpss_result[1]
+            }
+        return pd.DataFrame(results).T
+
+    def get_interpretability_key(self):
+        return self.interpretability_key.copy()
+
+    def get_processed_data(self):
+        return self.df.copy()
+
