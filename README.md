@@ -49,3 +49,5 @@ pip install -r requirements.txt
   **Files:**
 
   * `cpsi_index_final.ipynb`: Make sure to review this notebook since it has some modifications on how to create an explore different types of index.
+
+* The `ml_scripts/` folder contains a notebook where the three datasets (Index, WB Controls and Emissions) are merged to explore the relationship of the index and emissions totals as well as the impact of the index as a feature to predict total emissions.
