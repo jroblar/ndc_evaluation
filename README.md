@@ -34,7 +34,7 @@ pip install -r requirements.txt
 
   * `IEA_policies_clean.csv`
   * `IEA_scored_cpsi.csv`
-  * `total_emissions_df.csv`
+  * `total_emissions.csv`
   * `wb_control_vars.csv`
 
 * The `data/data_processing_scripts` folder contains notebooks used to generate the World Bank control datasets and the IEA policy dataset.
