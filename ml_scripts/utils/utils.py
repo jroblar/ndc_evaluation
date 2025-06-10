@@ -127,7 +127,7 @@ class PolicyEDA:
         plt.show()
 
     @staticmethod
-    def plot_correlation_matrix(df, iso_code):
+    def plot_correlation_matrix(df, iso_code=None):
         """
         Plots a correlation matrix heatmap for numeric columns in a DataFrame filtered by a specific ISO country code.
         Args:
@@ -140,8 +140,13 @@ class PolicyEDA:
             - Only numeric columns (float64 and int64) are considered for the correlation matrix.
             - The heatmap is displayed using Seaborn with annotations and a "coolwarm" colormap.
         """
-        # Filter the dataframe for the given ISO code
-        country_df = df[df['iso_alpha_3'] == iso_code]
+        if iso_code is None:
+            country_df = df
+            country_name = "All Countries"
+        else:
+            # Filter the dataframe for the given ISO code
+            country_df = df[df['iso_alpha_3'] == iso_code]
+            country_name = iso_code
         
         # Select only numeric columns
         numeric_cols = country_df.select_dtypes(include=['float64', 'int64'])
@@ -152,7 +157,7 @@ class PolicyEDA:
         # Plot the correlation matrix
         plt.figure(figsize=(10, 8))
         sns.heatmap(correlation_matrix, annot=True, fmt=".2f", cmap="coolwarm", cbar=True)
-        plt.title(f"Correlation Matrix for {iso_code}")
+        plt.title(f"Correlation Matrix for {country_name}")
         plt.xticks(rotation=45, ha='right')
         plt.tight_layout()
         plt.show()
@@ -259,7 +264,76 @@ class PolicyEDA:
             "SVN", "ESP", "SWE", "CHE", "TUR", "GBR", "USA"
         ]
         return oecd_iso_codes
+    
+    @staticmethod
+    def find_missing_oecd_countries(input_list, oecd_list=get_oecd_iso_codes()):
+        """
+        Compares two lists of ISO alpha-3 codes to find missing OECD countries.
 
+        Parameters:
+            input_list (list of str): The list of countries you have.
+            oecd_list (list of str): The reference list of OECD countries.
+
+        Returns:
+            set: A set of ISO alpha-3 codes that are in oecd_list but not in input_list.
+        """
+        input_set = set(input_list)
+        oecd_set = set(oecd_list)
+        missing = oecd_set - input_set
+        return missing
+    @staticmethod
+    def plot_column_distributions(df, columns, bins=30):
+        """
+        Plots histograms for the specified columns in the DataFrame.
+
+        Parameters:
+            df (pd.DataFrame): The input DataFrame.
+            columns (list of str): List of column names to plot.
+            bins (int, optional): Number of bins for the histograms. Defaults to 30.
+
+        Returns:
+            None: Displays the histograms.
+        """
+        n = len(columns)
+        ncols = 3
+        nrows = (n + ncols - 1) // ncols
+        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(5 * ncols, 4 * nrows))
+        axes = axes.flatten()
+
+        for i, col in enumerate(columns):
+            if col in df.columns:
+                sns.histplot(df[col].dropna(), bins=bins, kde=True, ax=axes[i])
+                axes[i].set_title(f"Distribution of {col}")
+                axes[i].set_xlabel(col)
+                axes[i].set_ylabel("Frequency")
+            else:
+                axes[i].set_visible(False)
+        for j in range(i + 1, len(axes)):
+            axes[j].set_visible(False)
+        plt.tight_layout()
+        plt.show()
+
+    @staticmethod
+    def plot_boxplot_by_class(df, continuous_var, class_var, fig_size=(10, 6)):
+        """
+        Plots boxplots of a continuous variable grouped by a multiclass variable.
+
+        Parameters:
+            df (pd.DataFrame): The input DataFrame.
+            continuous_var (str): The name of the continuous variable (y-axis).
+            class_var (str): The name of the multiclass variable (x-axis).
+
+        Returns:
+            None: Displays the boxplot.
+        """
+        plt.figure(figsize=fig_size)
+        sns.boxplot(x=class_var, y=continuous_var, data=df)
+        plt.title(f"Boxplot of {continuous_var} by {class_var}")
+        plt.xlabel(class_var)
+        plt.ylabel(continuous_var)
+        plt.grid(axis='y')
+        plt.tight_layout()
+        plt.show()
 
 class RegressionUtils:
     """
@@ -422,23 +496,26 @@ class ShapUtils:
             logger.error(f"Error for country {country}: {e}")
             return
 
-        # SHAP Beeswarm
-        print(f"SHAP Beeswarm (Global Feature Importance) - {country}")
-        shap.plots.beeswarm(shap_values, show=False)
-        plt.title(f"SHAP Beeswarm - {country}")
-        plt.tight_layout()
-        plt.show()
+        # Plot SHAP Beeswarm and Feature Importance side by side
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+        # SHAP Beeswarm (plot_size=None disables SHAP's internal resizing)
+        plt.sca(axes[0])
+        shap.plots.beeswarm(shap_values, show=False, plot_size=None)
+        axes[0].set_title(f"SHAP Beeswarm - {country}")
 
         # Feature Importance Plot
         importances = pd.Series(model.feature_importances_, index=features).sort_values(ascending=True)
-        importances.plot(kind='barh', title=f"Feature Importances - {country}")
-        plt.xlabel("Importance")
+        importances.plot(kind='barh', ax=axes[1])
+        axes[1].set_title(f"Feature Importances - {country}")
+        axes[1].set_xlabel("Importance")
+
         plt.tight_layout()
         plt.show()
 
-        # SHAP scatter for selected feature
+        # SHAP scatter for selected feature (separate plot)
         if plot_feature:
-            print(f"\nSHAP Scatter for feature: {plot_feature} - {country}")
+            plt.figure(figsize=(8, 6))
             shap.plots.scatter(shap_values[:, plot_feature], show=False)
             plt.title(f"SHAP Scatter for {plot_feature} - {country}")
             plt.tight_layout()
@@ -681,6 +758,7 @@ class EmissionsDataProcessor:
             'raw': variable,
             'log': f'log_{variable}',
             'dlog': f'dlog_{variable}',
+            'diff': f'diff_{variable}',
             'diff_dlog': f'diff_dlog_{variable}'
         }
 
@@ -707,20 +785,95 @@ class EmissionsDataProcessor:
                         pass
 
                 # Add p-values
-                row[f'ADF p-value {label}'] = adf_p
-                row[f'KPSS p-value {label}'] = kpss_p
+                row[f'{variable}_adf_p-value {label}'] = adf_p
+                row[f'{variable}_kpss_p-value {label}'] = kpss_p
 
                 # Add pass/fail flags
-                row[f'passed_ADF_{label}'] = adf_p < 0.05 if not np.isnan(adf_p) else np.nan
-                row[f'passed_KPSS_{label}'] = kpss_p >= 0.05 if not np.isnan(kpss_p) else np.nan
+                row[f'{variable}_passed_adf_{label}'] = adf_p < 0.05 if not np.isnan(adf_p) else np.nan
+                row[f'{variable}_passed_kpss_{label}'] = kpss_p >= 0.05 if not np.isnan(kpss_p) else np.nan
 
             result_rows.append(row)
 
         return pd.DataFrame(result_rows)
+    
+    def summarize_stationarity_agreement(self, summary_df, variable):
+        """
+        Computes the percentage of countries where both ADF and KPSS tests
+        agree on stationarity for each transformation.
+
+        Parameters:
+            summary_df (pd.DataFrame): Output of adf_kpss_test_summary()
+
+        Returns:
+            pd.Series: Percentage of agreement per transformation (raw, log, dlog, diff_dlog)
+        """
+        transformations = ['raw', 'log', 'dlog', 'diff', 'diff_dlog']
+        agreement_percentages = {}
+
+        for t in transformations:
+            adf_col = f'{variable}_passed_adf_{t}'
+            kpss_col = f'{variable}_passed_kpss_{t}'
+
+            valid = summary_df[[adf_col, kpss_col]].dropna()
+            if valid.empty:
+                agreement_percentages[t] = np.nan
+                continue
+
+            agreed = (valid[adf_col] & valid[kpss_col]).sum()
+            total = len(valid)
+            agreement_percentages[t] = 100 * agreed / total
+
+        return pd.Series(agreement_percentages, name="stationarity_agreement_percent")
+
 
     def get_interpretability_key(self):
         return self.interpretability_key.copy()
 
     def get_processed_data(self):
         return self.df.copy()
+
+class ModelEvaluationUtils:
+
+
+    @staticmethod
+    def plot_actual_vs_predicted_country(test_df, X_test, y_test, best_estimators, country='USA', model_name='rf'):
+        """
+        Plot actual vs. predicted dlog_total_emissions for a specific country and model.
+
+        Parameters:
+            test_df (pd.DataFrame): The test set with 'iso_alpha_3' and 'year' columns.
+            X_test (pd.DataFrame): Test features.
+            y_test (pd.Series): Test target values.
+            best_estimators (dict): Dict of trained models, e.g. {'rf': ..., 'gb': ..., 'mlp': ...}
+            country (str): ISO alpha-3 code for the country to plot.
+            model_name (str): Key for the model to use ('rf', 'gb', or 'mlp').
+        """
+        mask = test_df['iso_alpha_3'] == country
+        X_country = X_test[mask]
+        years     = test_df.loc[mask, 'year']
+        actual    = y_test[mask]
+        model = best_estimators[model_name]
+        predicted = model.predict(X_country)
+
+        comp = (
+            pd.DataFrame({
+                'year':      years,
+                'actual':    actual,
+                'predicted': predicted
+            })
+            .sort_values('year')
+            .reset_index(drop=True)
+        )
+
+        print(comp)
+
+        plt.figure(figsize=(8, 4))
+        plt.plot(comp['year'], comp['actual'],    marker='o', label='Actual')
+        plt.plot(comp['year'], comp['predicted'], marker='x', label='Predicted')
+        plt.title(f"dlog_total_emissions: actual vs. predicted for {country}")
+        plt.xlabel("Year")
+        plt.ylabel("dlog_total_emissions")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
 
