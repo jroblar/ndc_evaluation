@@ -33,7 +33,7 @@ pip install -r requirements.txt
   **Files:**
 
   * `IEA_policies_clean.csv`
-  * `IEA_scored_cpsi.csv`
+  * `IEA_scored_cpsi.csv`: Please run the `cpsi_index_final.ipynb` notebook to generate it since it's too large to store it on GitHub.
   * `total_emissions.csv`
   * `wb_control_vars.csv`
 
