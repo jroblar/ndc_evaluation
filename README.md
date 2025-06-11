@@ -1,8 +1,9 @@
-# Climate Policy Impact Analyzer (CPIA)
+# CPIA ML
 
 ## Objectives
 
-* Build a causal inference model to explore the impact of policies on CO₂e emissions mitigation.
+* Build a policy stringency index.
+* Build a dataset that merges global historic policy data with global historic emissions data.
 * Develop a predictive model to estimate how likely a country is to meet its target emissions in a specific future year, based on its policies, historical emission trends, and other socio-economic indicators.
 
 ## Getting Started
