@@ -1047,12 +1047,13 @@ class FeatureEngineering:
         for col in columns:
             if col not in df_out.columns:
                 continue
-            # Only consider columns with all positive values for log transform
-            if (df_out[col] <= 0).any():
+            # Only consider columns with all non-negative values for log transform
+            if (df_out[col] < 0).any():
                 continue
             skewness = df_out[col].skew()
             if abs(skewness) > skew_threshold:
-                df_out[f"{new_prefix}{col}"] = np.log(df_out[col])
+                # Use log1p to handle zeros (log1p(x) = log(1 + x))
+                df_out[f"{new_prefix}{col}"] = np.log1p(df_out[col])
                 cols_to_drop.append(col)
 
         print(f"Columns dropped due to high skewness: {cols_to_drop}")        
