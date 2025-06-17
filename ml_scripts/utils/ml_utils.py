@@ -9,7 +9,8 @@ from scipy.stats import qmc
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 import warnings
-from statsmodels.tools.sm_exceptions import ConvergenceWarning, ValueWarning
+from statsmodels.tools.sm_exceptions import ConvergenceWarning
+from typing import List, Any
 
 class EmissionsRFModel:
     """
@@ -469,3 +470,47 @@ class EnsembleProjections:
             plt.legend(loc="upper left")
         plt.tight_layout()
         plt.show()
+    
+    @staticmethod
+    def predict_ensemble_emissions(
+        ensemble_df: pd.DataFrame,
+        model: Any,
+        feature_cols: List[str],
+        exponentiate: bool = True
+    ) -> pd.DataFrame:
+        """
+        Given an ensemble of future feature vectors and a fitted sklearn‐style model (e.g. Pipeline),
+        predict log_total_emissions and (optionally) back‐transform to total_emissions.
+
+        Parameters
+        ----------
+        ensemble_df : pd.DataFrame
+            DataFrame with columns ['iso_alpha_3', 'future_id', 'year'] + feature_cols.
+        model : Any
+            A fitted model or Pipeline with a .predict(X) method that returns log_total_emissions.
+        feature_cols : List[str]
+            Column names to use as predictors (in the order the model expects).
+        exponentiate : bool, default=True
+            If True, creates a 'total_emissions' column = exp(log_total_emissions).
+
+        Returns
+        -------
+        pd.DataFrame
+            A copy of `ensemble_df` with two new columns:
+            - 'log_total_emissions': the raw model predictions
+            - 'total_emissions'     : exp(log_total_emissions) if exponentiate=True
+        """
+        # 1) Work on a copy
+        df = ensemble_df.copy()
+
+        # 2) Extract the feature matrix
+        X = df[feature_cols]
+
+        # 3) Run through the pipeline/model
+        df["log_total_emissions"] = model.predict(X)
+
+        # 4) Optional back‐transform
+        if exponentiate:
+            df["total_emissions"] = np.exp(df["log_total_emissions"])
+
+        return df
