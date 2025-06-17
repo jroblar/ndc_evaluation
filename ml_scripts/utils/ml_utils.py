@@ -5,6 +5,9 @@ from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import GroupKFold, TimeSeriesSplit
 from sklearn.linear_model import LinearRegression
 import pandas as pd
+from scipy.stats import qmc
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from statsmodels.tsa.arima.model import ARIMA
 
 
 class EmissionsRFModel:
@@ -196,96 +199,246 @@ class EmissionsRFModel:
         plt.tight_layout()
         plt.show()
 
-class EmissionsProjectionDataBuilder:
-    def __init__(self, df: pd.DataFrame, base_year: int = 2022, projection_years: list = list(range(2023, 2031))):
-        self.df = df.copy()
-        self.base_year = base_year
-        self.projection_years = projection_years
-        self.gdp_growth = {}
-        self.pop_growth = {}
-        self.proj_df = None
+class EnsembleProjections:
 
-    def compute_growth_rates(self, value_col: str) -> dict:
-        growth_rates = {}
-        for country, group in self.df.groupby('iso_alpha_3'):
-            g = group.dropna(subset=[value_col])
-            if len(g) >= 3:
-                X = g[['year']].values
-                y = np.log(g[value_col].values)
-                model = LinearRegression().fit(X, y)
-                growth_rates[country] = model.coef_[0]  # annual log growth rate
-            else:
-                growth_rates[country] = 0.0
-        return growth_rates
 
-    def estimate_growth(self):
-        self.gdp_growth = self.compute_growth_rates("gdp_2015_usd")
-        self.pop_growth = self.compute_growth_rates("population")
+    @staticmethod
+    def generate_ensemble(
+        df: pd.DataFrame,
+        feature_cols: list[str],
+        start_year: int,
+        end_year: int,
+        n_scenarios: int
+    ) -> pd.DataFrame:
+        """
+        Build an ensemble of future feature trajectories via Latin Hypercube sampling
+        of residuals around a per-country, per-feature linear trend.
 
-    def project_variable(self, colname: str, growth_dict: dict) -> pd.DataFrame:
-        projections = []
-        latest = self.df[self.df["year"] == self.base_year][["iso_alpha_3", colname]]
-        for _, row in latest.iterrows():
-            iso = row["iso_alpha_3"]
-            val = row[colname]
-            growth = growth_dict.get(iso, 0)
-            for year in self.projection_years:
-                years_ahead = year - self.base_year
-                projected_val = val * np.exp(growth * years_ahead)
-                projections.append({
-                    "iso_alpha_3": iso,
-                    "year": year,
-                    colname: projected_val
-                })
-        return pd.DataFrame(projections)
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Original historical data with columns
+            ['iso_alpha_3', 'year'] + feature_cols.
+        feature_cols : list[str]
+            List of feature column names to simulate.
+        start_year : int
+            First year of your simulated horizon (e.g. 2023).
+        end_year : int
+            Last year of your simulated horizon (e.g. 2030).
+        n_scenarios : int
+            Number of future trajectories to generate per country.
 
-    def build_projection_dataset(self) -> pd.DataFrame:
-        if not self.gdp_growth or not self.pop_growth:
-            self.estimate_growth()
+        Returns
+        -------
+        pd.DataFrame
+            Long‐form DataFrame with columns
+            ['iso_alpha_3', 'future_id', 'year'] + feature_cols.
+        """
 
-        gdp_proj = self.project_variable("gdp_2015_usd", self.gdp_growth)
-        pop_proj = self.project_variable("population", self.pop_growth)
+        # prepare output accumulator
+        rows: list[dict] = []
 
-        proj_df = pd.merge(gdp_proj, pop_proj, on=["iso_alpha_3", "year"])
-        proj_df["total_emissions"] = np.nan  # Placeholder for future predictions
+        # 1) for each country, fit a linear trend + capture residuals
+        for iso, grp in df.groupby("iso_alpha_3"):
+            # build and store per‐feature models + residuals
+            models: dict[str, LinearRegression] = {}
+            residuals: dict[str, np.ndarray] = {}
 
-        # Combine with original data
-        full_df = pd.concat([self.df, proj_df], ignore_index=True).sort_values(by=["iso_alpha_3", "year"])
-        self.proj_df = full_df
-        return full_df
+            X = grp["year"].to_numpy().reshape(-1, 1)
+            for feat in feature_cols:
+                y = grp[feat].to_numpy()
+                lr = LinearRegression().fit(X, y)
+                models[feat] = lr
+                residuals[feat] = y - lr.predict(X)
+
+            # 2) Latin Hypercube draws
+            sampler = qmc.LatinHypercube(d=len(feature_cols))
+            # draws shape = (n_scenarios, n_features), uniform in [0,1)
+            u = sampler.random(n=n_scenarios)
+
+            # 3) for each scenario, map uniform draws → residual quantiles → simulate
+            for i in range(n_scenarios):
+                future_id = f"id_{iso}_{i+1}"
+                # map each feature's u_i → q‐quantile of residuals
+                resid_q = {
+                    feat: np.quantile(residuals[feat], u[i, j])
+                    for j, feat in enumerate(feature_cols)
+                }
+
+                # simulate the full time series for this scenario
+                for year in range(start_year, end_year + 1):
+                    row = {
+                        "iso_alpha_3": iso,
+                        "future_id": future_id,
+                        "year": year,
+                    }
+                    for feat in feature_cols:
+                        base_trend = models[feat].predict([[year]])[0]
+                        row[feat] = base_trend + resid_q[feat]
+                    rows.append(row)
+
+        # assemble into DataFrame
+        ensemble_df = pd.DataFrame(rows)
+
+        # ensure correct column order
+        cols = ["iso_alpha_3", "future_id", "year"] + feature_cols
+        return ensemble_df[cols]
     
-    def predict_emissions_stepwise(self, df, model, feature_cols):
-        df = df.copy()
-        df.sort_values(["iso_alpha_3", "year"], inplace=True)
-        
-        countries = df["iso_alpha_3"].unique()
-        
-        for iso in countries:
-            # We will work with the index directly on df to ensure updates persist
-            country_idx = df[df["iso_alpha_3"] == iso].index.tolist()
-            
-            for i in range(len(country_idx)):
-                idx = country_idx[i]
-                row = df.loc[idx]
-                
-                # Only predict if emissions are missing
-                if pd.isna(row["log_total_emissions"]):
-                    # Ensure lag values are updated from df, not from stale local copy
-                    lag1 = df.loc[country_idx[i - 1], "log_total_emissions"] if i - 1 >= 0 else np.nan
-                    lag2 = df.loc[country_idx[i - 2], "log_total_emissions"] if i - 2 >= 0 else np.nan
-                    
-                    df.loc[idx, "log_total_emissions_lag1"] = lag1
-                    df.loc[idx, "log_total_emissions_lag2"] = lag2
+    @staticmethod
+    def generate_ensemble_ts(
+        df: pd.DataFrame,
+        feature_cols: list[str],
+        start_year: int,
+        end_year: int,
+        n_scenarios: int,
+        method: str = "ets",
+        arima_order: tuple[int, int, int] = (1, 1, 1),
+        random_state: int | None = None
+    ) -> pd.DataFrame:
+        """
+        Generate an ensemble of future feature trajectories using ETS+Monte Carlo
+        or ARIMA+bootstrap for each country-feature series.
 
-                    # Build feature vector from updated row
-                    feature_row = df.loc[idx, feature_cols]
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Historical data with columns ['iso_alpha_3', 'year'] + feature_cols.
+        feature_cols : list[str]
+            List of feature names to simulate (exclude emissions).
+        start_year : int
+            First forecast year (e.g. 2023).
+        end_year : int
+            Last forecast year (e.g. 2030).
+        n_scenarios : int
+            Number of simulated futures per country.
+        method : {"ets", "arima"}
+            Which method to use:
+            - "ets": fit statsmodels ExponentialSmoothing (additive trend, no seasonality)
+            and do Monte Carlo by bootstrapping in-sample residuals.
+            - "arima": fit statsmodels ARIMA(arima_order) and bootstrap via `simulate`.
+        arima_order : tuple[int,int,int]
+            (p,d,q) for ARIMA if method == "arima".
+        random_state : int or None
+            Seed for reproducible random draws (only for "ets" residual sampling).
 
-                    if feature_row.isna().any():
-                        continue  # skip if still missing required values
+        Returns
+        -------
+        pd.DataFrame
+            Long‐form DataFrame with columns
+            ['iso_alpha_3', 'future_id', 'year'] + feature_cols.
+        """
+        rng = np.random.default_rng(random_state)
+        years = np.arange(start_year, end_year + 1)
+        horizon = len(years)
+        rows: list[dict] = []
 
-                    input_features = pd.DataFrame([feature_row.values], columns=feature_cols)
-                    pred = model.predict(input_features)[0]
-                    
-                    df.loc[idx, "log_total_emissions"] = pred
+        for iso, grp in df.groupby("iso_alpha_3"):
+            grp = grp.sort_values("year")
+            for feat in feature_cols:
+                # extract the historical series
+                hist = grp.set_index("year")[feat]
 
-        return df
+                if method == "ets":
+                    # fit ETS (additive trend, no seasonality)
+                    ets_model = ExponentialSmoothing(
+                        hist,
+                        trend="add",
+                        seasonal=None,
+                        initialization_method="estimated"
+                    ).fit()
+                    fitted = ets_model.fittedvalues
+                    resid = hist.values - fitted.values
+                    # deterministic forecast
+                    base_forecast = ets_model.forecast(horizon)
+
+                    # generate bootstrap sims: sample resid with replacement
+                    sims = np.vstack([
+                        base_forecast.values +
+                        rng.choice(resid, size=horizon, replace=True)
+                        for _ in range(n_scenarios)
+                    ])
+
+                elif method == "arima":
+                    # fit ARIMA
+                    arima_model = ARIMA(hist, order=arima_order).fit()
+                    # simulate futures
+                    sims = np.vstack([
+                        np.array(arima_model.simulate(nsimulations=horizon, anchor="end"))
+                        for _ in range(n_scenarios)
+                    ])
+
+                else:
+                    raise ValueError("method must be 'ets' or 'arima'")
+
+                # record each scenario & year
+                for i in range(n_scenarios):
+                    future_id = f"id_{iso}_{i+1}"
+                    for t, year in enumerate(years):
+                        rows.append({
+                            "iso_alpha_3": iso,
+                            "future_id": future_id,
+                            "year": year,
+                            feat: sims[i, t]
+                        })
+
+        ensemble_df = pd.DataFrame(rows)
+        # ensure column order
+        cols = ["iso_alpha_3", "future_id", "year"] + feature_cols
+        return ensemble_df[cols]
+
+
+    @staticmethod
+    def plot_ensemble_time_series(
+        df, 
+        iso_alpha_3, 
+        column, 
+        hist_df=None, 
+        title=None, 
+        ylabel=None, 
+        xlabel="Year", 
+        figsize=(10, 6)
+    ):
+        """
+        Pony-tail plot: many thin ensemble forecasts + one bold historical.
+        """
+        # 1. Subset and sort
+        ens = (
+            df[df["iso_alpha_3"] == iso_alpha_3]
+            .sort_values(["future_id", "year"])
+        )
+        plt.figure(figsize=figsize)
+
+        # 2. Plot ensemble as light gray lines (no labels)
+        for _, grp in ens.groupby("future_id"):
+            plt.plot(
+                grp["year"], 
+                grp[column], 
+                color="gray", 
+                linewidth=1, 
+                alpha=0.5
+            )
+
+        # 3. Overlay historical series
+        if hist_df is not None:
+            hist = (
+                hist_df[hist_df["iso_alpha_3"] == iso_alpha_3]
+                .sort_values("year")
+            )
+            if not hist.empty:
+                plt.plot(
+                    hist["year"],
+                    hist[column],
+                    color="black",
+                    linewidth=2.5,
+                    marker="o",
+                    label="Historical"
+                )
+
+        # 4. Labels & legend
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel or column)
+        plt.title(title or f"{iso_alpha_3} – {column} (Ensemble)")
+        if hist_df is not None and not hist.empty:
+            plt.legend(loc="upper left")
+        plt.tight_layout()
+        plt.show()
