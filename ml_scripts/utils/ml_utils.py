@@ -285,7 +285,7 @@ class EnsembleProjections:
         return ensemble_df[cols]
     
     @staticmethod
-    def generate_ensemble_ts(
+    def generate_ensemble_ts_lhs(
         df: pd.DataFrame,
         feature_cols: list[str],
         start_year: int,
@@ -296,8 +296,35 @@ class EnsembleProjections:
         random_state: int | None = None
     ) -> pd.DataFrame:
         """
-        Generate an ensemble of future feature trajectories using ETS+Monte Carlo
-        or ARIMA+bootstrap for each country-feature series, **with a proper PeriodIndex**.
+        Generate an ensemble of future feature trajectories by:
+        1) simulating `n_scenarios` per‐feature futures via ETS or ARIMA,
+        2) combining those feature‐level simulations into joint scenarios
+            using Latin Hypercube Sampling (LHS).
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Historical data with ['iso_alpha_3','year'] + feature_cols.
+        feature_cols : list[str]
+            List of feature names to simulate (exclude emissions).
+        start_year : int
+            First forecast year (e.g. 2023).
+        end_year : int
+            Last forecast year (e.g. 2030).
+        n_scenarios : int
+            Number of joint futures to generate per country.
+        method : {"ets","arima"}
+            ETS = Holt–Winters additive trend; ARIMA = bootstrap via `.simulate()`.
+        arima_order : tuple[int,int,int]
+            (p,d,q) for ARIMA if method="arima".
+        random_state : int or None
+            Seed for reproducible sampling.
+
+        Returns
+        -------
+        pd.DataFrame
+            Long‐form DataFrame with columns
+            ['iso_alpha_3','future_id','year'] + feature_cols.
         """
         rng = np.random.default_rng(random_state)
         years = np.arange(start_year, end_year + 1)
@@ -306,43 +333,36 @@ class EnsembleProjections:
 
         for iso, grp in df.groupby("iso_alpha_3"):
             grp = grp.sort_values("year")
+
+            # 1) Simulate n_scenarios per feature
+            sims_dict: dict[str, np.ndarray] = {}
             for feat in feature_cols:
-                # ——— Build a proper annual PeriodIndex on your historical data ———
                 hist = grp.set_index("year")[feat].copy()
-                hist.index = pd.PeriodIndex(hist.index, freq='Y')  
+                hist.index = pd.PeriodIndex(hist.index, freq="Y")
 
                 if method == "ets":
-                    # fit ETS
                     ets_model = ExponentialSmoothing(
                         hist,
                         trend="add",
                         seasonal=None,
                         initialization_method="estimated"
                     ).fit()
-
-                    # in-sample residuals
                     fitted = ets_model.fittedvalues
                     resid = hist.values - fitted.values
+                    base_forecast = ets_model.forecast(horizon).values
 
-                    # baseline forecast (PeriodIndex of length=horizon)
-                    base_forecast = ets_model.forecast(horizon)
-
-                    # bootstrap residuals to build M sims
+                    # bootstrap residuals → sims shape (n_scenarios, horizon)
                     sims = np.vstack([
-                        base_forecast.values +
-                        rng.choice(resid, size=horizon, replace=True)
+                        base_forecast + rng.choice(resid, size=horizon, replace=True)
                         for _ in range(n_scenarios)
                     ])
 
                 elif method == "arima":
-                    # fit ARIMA
                     arima_model = ARIMA(hist, order=arima_order).fit()
-
-                    # simulate futures: PeriodIndex is preserved
                     sims = np.vstack([
                         arima_model.simulate(
                             nsimulations=horizon,
-                            anchor='end'
+                            anchor="end"
                         ).values
                         for _ in range(n_scenarios)
                     ])
@@ -350,16 +370,29 @@ class EnsembleProjections:
                 else:
                     raise ValueError("method must be 'ets' or 'arima'")
 
-                # record each scenario & year
-                for i in range(n_scenarios):
-                    future_id = f"id_{iso}_{i+1}"
-                    for t, year in enumerate(years):
-                        rows.append({
-                            "iso_alpha_3": iso,
-                            "future_id": future_id,
-                            "year": year,
-                            feat: sims[i, t]
-                        })
+                sims_dict[feat] = sims
+
+            # 2) Build an LHS sampler for feature‐combination indices
+            sampler = qmc.LatinHypercube(d=len(feature_cols), seed=random_state)
+            u = sampler.random(n=n_scenarios)  # shape = (n_scenarios, n_features)
+            # convert uniform [0,1) → integer indices [0, n_scenarios-1]
+            idx = (u * n_scenarios).astype(int)
+
+            # 3) Assemble joint scenarios
+            for s in range(n_scenarios):
+                future_id = f"id_{iso}_{s+1}"
+                for t, year in enumerate(years):
+                    row = {
+                        "iso_alpha_3": iso,
+                        "future_id": future_id,
+                        "year": year
+                    }
+                    # pick the t-th year value from the selected sim for each feature
+                    for j, feat in enumerate(feature_cols):
+                        sim_index = idx[s, j]
+                        row[feat] = sims_dict[feat][sim_index, t]
+                    rows.append(row)
+
         ensemble_df = pd.DataFrame(rows)
         cols = ["iso_alpha_3", "future_id", "year"] + feature_cols
         return ensemble_df[cols]
