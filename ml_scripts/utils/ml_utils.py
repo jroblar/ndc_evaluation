@@ -297,35 +297,7 @@ class EnsembleProjections:
     ) -> pd.DataFrame:
         """
         Generate an ensemble of future feature trajectories using ETS+Monte Carlo
-        or ARIMA+bootstrap for each country-feature series.
-
-        Parameters
-        ----------
-        df : pd.DataFrame
-            Historical data with columns ['iso_alpha_3', 'year'] + feature_cols.
-        feature_cols : list[str]
-            List of feature names to simulate (exclude emissions).
-        start_year : int
-            First forecast year (e.g. 2023).
-        end_year : int
-            Last forecast year (e.g. 2030).
-        n_scenarios : int
-            Number of simulated futures per country.
-        method : {"ets", "arima"}
-            Which method to use:
-            - "ets": fit statsmodels ExponentialSmoothing (additive trend, no seasonality)
-            and do Monte Carlo by bootstrapping in-sample residuals.
-            - "arima": fit statsmodels ARIMA(arima_order) and bootstrap via `simulate`.
-        arima_order : tuple[int,int,int]
-            (p,d,q) for ARIMA if method == "arima".
-        random_state : int or None
-            Seed for reproducible random draws (only for "ets" residual sampling).
-
-        Returns
-        -------
-        pd.DataFrame
-            Long‐form DataFrame with columns
-            ['iso_alpha_3', 'future_id', 'year'] + feature_cols.
+        or ARIMA+bootstrap for each country-feature series, **with a proper PeriodIndex**.
         """
         rng = np.random.default_rng(random_state)
         years = np.arange(start_year, end_year + 1)
@@ -335,23 +307,27 @@ class EnsembleProjections:
         for iso, grp in df.groupby("iso_alpha_3"):
             grp = grp.sort_values("year")
             for feat in feature_cols:
-                # extract the historical series
-                hist = grp.set_index("year")[feat]
+                # ——— Build a proper annual PeriodIndex on your historical data ———
+                hist = grp.set_index("year")[feat].copy()
+                hist.index = pd.PeriodIndex(hist.index, freq='Y')  
 
                 if method == "ets":
-                    # fit ETS (additive trend, no seasonality)
+                    # fit ETS
                     ets_model = ExponentialSmoothing(
                         hist,
                         trend="add",
                         seasonal=None,
                         initialization_method="estimated"
                     ).fit()
+
+                    # in-sample residuals
                     fitted = ets_model.fittedvalues
                     resid = hist.values - fitted.values
-                    # deterministic forecast
+
+                    # baseline forecast (PeriodIndex of length=horizon)
                     base_forecast = ets_model.forecast(horizon)
 
-                    # generate bootstrap sims: sample resid with replacement
+                    # bootstrap residuals to build M sims
                     sims = np.vstack([
                         base_forecast.values +
                         rng.choice(resid, size=horizon, replace=True)
@@ -361,9 +337,13 @@ class EnsembleProjections:
                 elif method == "arima":
                     # fit ARIMA
                     arima_model = ARIMA(hist, order=arima_order).fit()
-                    # simulate futures
+
+                    # simulate futures: PeriodIndex is preserved
                     sims = np.vstack([
-                        np.array(arima_model.simulate(nsimulations=horizon, anchor="end"))
+                        arima_model.simulate(
+                            nsimulations=horizon,
+                            anchor='end'
+                        ).values
                         for _ in range(n_scenarios)
                     ])
 
@@ -380,9 +360,7 @@ class EnsembleProjections:
                             "year": year,
                             feat: sims[i, t]
                         })
-
         ensemble_df = pd.DataFrame(rows)
-        # ensure column order
         cols = ["iso_alpha_3", "future_id", "year"] + feature_cols
         return ensemble_df[cols]
 
