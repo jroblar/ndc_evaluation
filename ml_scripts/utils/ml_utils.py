@@ -213,7 +213,7 @@ class EmissionsProjectionDataBuilder:
                 X = g[['year']].values
                 y = np.log(g[value_col].values)
                 model = LinearRegression().fit(X, y)
-                growth_rates[country] = model.coef_[0]  # log-point growth rate
+                growth_rates[country] = model.coef_[0]  # annual log growth rate
             else:
                 growth_rates[country] = 0.0
         return growth_rates
@@ -246,15 +246,46 @@ class EmissionsProjectionDataBuilder:
         gdp_proj = self.project_variable("gdp_2015_usd", self.gdp_growth)
         pop_proj = self.project_variable("population", self.pop_growth)
 
-        df_proj = pd.merge(gdp_proj, pop_proj, on=["iso_alpha_3", "year"])
+        proj_df = pd.merge(gdp_proj, pop_proj, on=["iso_alpha_3", "year"])
+        proj_df["total_emissions"] = np.nan  # Placeholder for future predictions
 
-        # Get emission lag1 from base year
-        latest_em = self.df[self.df["year"] == self.base_year][["iso_alpha_3", "total_emissions"]].copy()
-        latest_em["log_total_emissions_lag1"] = np.log(latest_em["total_emissions"])
-        latest_em = latest_em[["iso_alpha_3", "log_total_emissions_lag1"]]
+        # Combine with original data
+        full_df = pd.concat([self.df, proj_df], ignore_index=True).sort_values(by=["iso_alpha_3", "year"])
+        self.proj_df = full_df
+        return full_df
+    
+    def predict_emissions_stepwise(self, df, model, feature_cols):
+        df = df.copy()
+        df.sort_values(["iso_alpha_3", "year"], inplace=True)
+        
+        countries = df["iso_alpha_3"].unique()
+        
+        for iso in countries:
+            # We will work with the index directly on df to ensure updates persist
+            country_idx = df[df["iso_alpha_3"] == iso].index.tolist()
+            
+            for i in range(len(country_idx)):
+                idx = country_idx[i]
+                row = df.loc[idx]
+                
+                # Only predict if emissions are missing
+                if pd.isna(row["log_total_emissions"]):
+                    # Ensure lag values are updated from df, not from stale local copy
+                    lag1 = df.loc[country_idx[i - 1], "log_total_emissions"] if i - 1 >= 0 else np.nan
+                    lag2 = df.loc[country_idx[i - 2], "log_total_emissions"] if i - 2 >= 0 else np.nan
+                    
+                    df.loc[idx, "log_total_emissions_lag1"] = lag1
+                    df.loc[idx, "log_total_emissions_lag2"] = lag2
 
-        df_proj = pd.merge(df_proj, latest_em, on="iso_alpha_3", how="left")
-        df_proj["log_total_emissions_lag2"] = df_proj["log_total_emissions_lag1"]  # Same for 1st iteration
+                    # Build feature vector from updated row
+                    feature_row = df.loc[idx, feature_cols]
 
-        self.proj_df = df_proj
-        return df_proj
+                    if feature_row.isna().any():
+                        continue  # skip if still missing required values
+
+                    input_features = pd.DataFrame([feature_row.values], columns=feature_cols)
+                    pred = model.predict(input_features)[0]
+                    
+                    df.loc[idx, "log_total_emissions"] = pred
+
+        return df
