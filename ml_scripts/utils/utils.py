@@ -127,7 +127,7 @@ class PolicyEDA:
         plt.show()
 
     @staticmethod
-    def plot_correlation_matrix(df, iso_code=None):
+    def plot_correlation_matrix(df, iso_code=None, figsize=(12, 10)):
         """
         Plots a correlation matrix heatmap for numeric columns in a DataFrame filtered by a specific ISO country code.
         Args:
@@ -155,7 +155,7 @@ class PolicyEDA:
         correlation_matrix = numeric_cols.corr()
         
         # Plot the correlation matrix
-        plt.figure(figsize=(10, 8))
+        plt.figure(figsize=figsize)
         sns.heatmap(correlation_matrix, annot=True, fmt=".2f", cmap="coolwarm", cbar=True)
         plt.title(f"Correlation Matrix for {country_name}")
         plt.xticks(rotation=45, ha='right')
@@ -224,7 +224,7 @@ class PolicyEDA:
         plt.show()
 
     @staticmethod
-    def create_pairplot(df, cols, iso3=None):
+    def create_pairplot(df, iso3=None):
         """
         Generates a pairplot for the specified columns in a DataFrame, optionally filtered by a specific ISO Alpha-3 country code.
         Parameters:
@@ -246,6 +246,12 @@ class PolicyEDA:
         """
         if iso3:
             df = df[df['iso_alpha_3'] == iso3]
+
+        # Select numeric columns for the pairplot
+        cols = df.select_dtypes(include=['float64', 'int64']).columns.tolist()
+        if not cols:
+            logger.warning("No numeric columns found for pairplot. Please check the DataFrame.")
+            return
         
         # Create a pairplot
         sns.pairplot(df[cols])
@@ -334,6 +340,66 @@ class PolicyEDA:
         plt.grid(axis='y')
         plt.tight_layout()
         plt.show()
+
+    @staticmethod
+    def plot_numeric_fields_distributions(df):
+        """
+        Plots the distributions of all numeric fields in the DataFrame.
+
+        Parameters:
+            df (pd.DataFrame): The input DataFrame containing numeric fields.
+
+        Returns:
+            None: Displays the distribution plots for each numeric field.
+        """
+        numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns.tolist()
+        if not numeric_cols:
+            logger.warning("No numeric columns found in the DataFrame.")
+            return
+
+        n = len(numeric_cols)
+        ncols = 3
+        nrows = (n + ncols - 1) // ncols
+        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(5 * ncols, 4 * nrows))
+        axes = axes.flatten()
+
+        for i, col in enumerate(numeric_cols):
+            sns.histplot(df[col].dropna(), bins=30, kde=True, ax=axes[i])
+            axes[i].set_title(f"Distribution of {col}")
+            axes[i].set_xlabel(col)
+            axes[i].set_ylabel("Frequency")
+
+        for j in range(i + 1, len(axes)):
+            axes[j].set_visible(False)
+
+        plt.tight_layout()
+        plt.show()
+
+    @staticmethod
+    def plot_barplot_for_categorical_field(df, categorical_field):
+        """
+        Plots a bar plot for the counts of each category in a specified categorical field.
+
+        Parameters:
+            df (pd.DataFrame): The input DataFrame containing the data.
+            categorical_field (str): The name of the categorical field to plot.
+
+        Returns:
+            None: Displays the bar plot.
+        """
+        if categorical_field not in df.columns:
+            logger.error(f"Column '{categorical_field}' does not exist in the DataFrame.")
+            return
+
+        plt.figure(figsize=(10, 6))
+        sns.countplot(data=df, x=categorical_field, order=df[categorical_field].value_counts().index)
+        plt.title(f"Bar Plot of {categorical_field}")
+        plt.xlabel(categorical_field)
+        plt.ylabel("Count")
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.show()
+
 
 class RegressionUtils:
     """
@@ -876,4 +942,122 @@ class ModelEvaluationUtils:
         plt.legend()
         plt.tight_layout()
         plt.show()
+
+    
+class DataCleaningUtils:
+
+    @staticmethod
+    def fill_numeric_missing_by_group(df, group_cols):
+        """
+        Forward and backward fills missing values for all numeric columns in the dataframe,
+        grouped by the specified columns.
+
+        Parameters:
+            df (pd.DataFrame): The dataframe to fill.
+            group_cols (list): List of columns to group by.
+
+        Returns:
+            pd.DataFrame: DataFrame with missing numeric values filled.
+        """
+        numeric_cols = df.select_dtypes(include='number').columns.difference(group_cols)
+        df = df.sort_values(group_cols)
+        df[numeric_cols] = (
+            df.groupby(group_cols)[numeric_cols]
+            .ffill().bfill()
+        )
+        return df
+
+class FeatureEngineering:
+
+
+    @staticmethod
+    def generate_lagged_features(df, columns, max_lag=3):
+        """
+        Generates lagged features for specified columns in the DataFrame.
+
+        Parameters:
+            df (pd.DataFrame): The input DataFrame.
+            columns (list of str): List of column names to generate lagged features for.
+            max_lag (int): Maximum number of lags to generate.
+
+        Returns:
+            pd.DataFrame: DataFrame with new lagged feature columns added.
+        """
+        df_with_lags = df.copy()
+        
+        for col in columns:
+            for lag in range(1, max_lag + 1):
+                df_with_lags[f"{col}_lag{lag}"] = df_with_lags.groupby("iso_alpha_3")[col].shift(lag)
+        return df_with_lags
+    
+    @staticmethod
+    def generate_growth_rate_features(df, columns):
+        """
+        Generates year-on-year growth rate features for specified columns in the DataFrame.
+
+        Parameters:
+            df (pd.DataFrame): The input DataFrame.
+            columns (list of str): List of column names to generate growth rate features for.
+
+        Returns:
+            pd.DataFrame: DataFrame with new growth rate feature columns added.
+        """
+        df_with_growth_rates = df.copy()
+        
+        for col in columns:
+            df_with_growth_rates[f"{col}_growth_rate"] = df_with_growth_rates.groupby("iso_alpha_3")[col].pct_change()
+        return df_with_growth_rates
+    
+
+    @staticmethod
+    def one_hot_encode_categorical(df, categorical_columns, drop_first=False, prefix_sep='_'):
+        """
+        Performs one-hot encoding on the specified categorical columns.
+
+        Parameters:
+            df (pd.DataFrame): The input DataFrame.
+            categorical_columns (list of str): List of categorical column names to encode.
+            drop_first (bool, optional): Whether to drop the first level to avoid multicollinearity. Defaults to False.
+            prefix_sep (str, optional): Separator to use for new column names. Defaults to '_'.
+
+        Returns:
+            pd.DataFrame: DataFrame with one-hot encoded columns.
+        """
+        one_hot_encoded_df = df.copy()
+        
+        return pd.get_dummies(one_hot_encoded_df, columns=categorical_columns, drop_first=drop_first, prefix_sep=prefix_sep, dtype=int)
+    
+
+    @staticmethod
+    def log_transform_high_skew(df, columns, skew_threshold=1.0, new_prefix='log_'):
+        """
+        Applies a log transformation to columns with high skewness and drops the original highly skewed columns.
+
+        Parameters:
+            df (pd.DataFrame): The input DataFrame.
+            columns (list of str): List of column names to check for skewness and transform.
+            skew_threshold (float, optional): Absolute skewness above which to apply log transform. Defaults to 1.0.
+            new_prefix (str, optional): Prefix for new log-transformed columns. Defaults to 'log_'.
+
+        Returns:
+            pd.DataFrame: DataFrame with new log-transformed columns added and highly skewed original columns dropped.
+        """
+        df_out = df.copy()
+        cols_to_drop = []
+        for col in columns:
+            if col not in df_out.columns:
+                continue
+            # Only consider columns with all non-negative values for log transform
+            if (df_out[col] < 0).any():
+                continue
+            skewness = df_out[col].skew()
+            if abs(skewness) > skew_threshold:
+                # Use log1p to handle zeros (log1p(x) = log(1 + x))
+                df_out[f"{new_prefix}{col}"] = np.log1p(df_out[col])
+                cols_to_drop.append(col)
+
+        print(f"Columns dropped due to high skewness: {cols_to_drop}")        
+        if cols_to_drop:
+            df_out = df_out.drop(columns=cols_to_drop)
+        return df_out
 
