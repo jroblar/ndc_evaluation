@@ -1,21 +1,21 @@
-# CPIA ML
+# Emissions Target Probability Explorer (ETPE)
 
-## Objectives
+## 🎯 Objectives
 
-* Build a policy stringency index.
-* Build a dataset that merges global historic policy data with global historic emissions data.
-* Develop a predictive model to estimate how likely a country is to meet its target emissions in a specific future year, based on its policies, historical emission trends, and other socio-economic indicators.
+* Develop a framework to estimate the likelihood that a country will meet its 2030 emissions target, based on historical emissions trends and socio-economic indicators.
+* Generate probabilistic emissions projections ("pony-tails") for each country to create a distribution of possible emission values by 2030.
+* Assess each country’s 2030 emissions target by calculating the probability of target achievement according to the generated emissions distribution.
 
-## Getting Started
+## 🚀 Getting Started
 
-### Create the environment:
+### 1. Create the Environment
 
 ```bash
-conda create -n cpia_env python=3.11
-conda activate cpia_env
+conda create -n etpe_env python=3.11
+conda activate etpe_env
 ```
 
-### Install dependencies:
+### 2. Install Dependencies
 
 Inside the project folder, run:
 
@@ -23,32 +23,34 @@ Inside the project folder, run:
 pip install -r requirements.txt
 ```
 
-## Important Files
+## 📁 Important Files and Structure
 
-* The `data/processed_data` folder contains processed datasets for:
+### `data/processed_data/`
 
-  * Policies and the policy index
-  * Historical emissions data
-  * World Bank socio-economic indicators
+Contains cleaned and processed datasets:
 
-  **Files:**
+* **`IEA_policies_clean.csv`** – Cleaned IEA climate policy dataset.
+* **`IEA_scored_cpsi.csv`** – Climate Policy Stringency Index (CPSI). Run `cpsi_index_final.ipynb` to generate this file (too large for GitHub).
+* **`total_emissions.csv`** – Historical emissions time series per country.
+* **`wb_indicators.csv`** – Historical time series of socio-economic indicators per country.
 
-  * `IEA_policies_clean.csv`
-  * `IEA_scored_cpsi.csv`: Please run the `cpsi_index_final.ipynb` notebook to generate it since it's too large to store it on GitHub.
-  * `total_emissions.csv`
-  * `wb_control_vars.csv`
+### `data/data_processing_scripts/`
 
-* The `data/data_processing_scripts` folder contains notebooks used to generate the World Bank control datasets and the IEA policy dataset.
+Notebooks used to process raw datasets from World Bank and IEA:
 
-  **Files:**
+* **`IEA_eda.ipynb`** – Performs EDA and cleans the IEA policy dataset. Produces `IEA_policies_clean.csv`.
+* **`wb_data_etl.ipynb`** – Fetches and processes World Bank indicators. Produces `wb_indicators.csv`.
+* **`emissions_data_etl.ipynb`** – Processes EDGAR emissions data. Produces `total_emissions.csv`.
 
-  * `IEA_eda.ipynb`
-  * `wb_controls_v2.ipynb`
+### `index/`
 
-* The `index/` folder contains files to create the Climate Policy Stringency Index (CPSI) out of `IEA_policies_clean.csv`.
+Files for constructing the Climate Policy Stringency Index (CPSI):
 
-  **Files:**
+* **`cpsi_index_final.ipynb`** – Builds and explores multiple CPSI index variants. Review for methodological notes and scoring approaches. Produces `IEA_scored_cpsi.csv`.
 
-  * `cpsi_index_final.ipynb`: Make sure to review this notebook since it has some modifications on how to create an explore different types of index.
+### `ml_scripts/`
 
-* The `ml_scripts/` folder contains a notebook where the three datasets (Index, WB Controls and Emissions) are merged to explore the relationship of the index and emissions totals as well as the impact of the index as a feature to predict total emissions.
+Notebook(s) for merging socio-economic and emissions data, perform exploratory data analysis  and for training machine learning models to estimate emissions trajectories and likelihood of target achievement.
+
+* **`model_v6.ipynb`** – Trains an RF model to predict emissions using World Bank indicators. In addition it creates an ensemble of projected predictors using an ARIMA model and then predicts future emissions based on this new trajectories.
+
