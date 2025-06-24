@@ -47,6 +47,7 @@ Notebooks used to process raw datasets from World Bank and IEA:
 Files for constructing the Climate Policy Stringency Index (CPSI):
 
 * **`cpsi_index_final.ipynb`** – Builds and explores multiple CPSI index variants. Review for methodological notes and scoring approaches. Produces `IEA_scored_cpsi.csv`.
+* **`documentation/index_report.pdf`** – Documentation on how the index was built.
 
 ### `ml_scripts/`
 
