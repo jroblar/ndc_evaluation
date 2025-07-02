@@ -4,12 +4,13 @@ import matplotlib.pyplot as plt
 from typing import List, Any
 
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, OneHotEncoder
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import ElasticNetCV, LinearRegression
 from sklearn.dummy import DummyRegressor
 from sklearn.model_selection import GroupKFold, TimeSeriesSplit, GridSearchCV, cross_val_score, train_test_split, RandomizedSearchCV, KFold, cross_validate
 from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
+from sklearn.compose import ColumnTransformer
 from xgboost import XGBRegressor
 
 from scipy.stats import qmc
@@ -26,43 +27,59 @@ class RegressionAnalysis:
                  year_col: str,
                  feature_cols: list = None,
                  holdout_years: int = 5,
-                 tree_based_models_with_scaler: bool = True,
-                 rf_params: dict = None,
-                 rf_tune: bool = False,
-                 rf_tune_params: dict = None,
                  xgb_params: dict = None,
                  xgb_tune: bool = False,
                  xgb_tune_params: dict = None,
-                 scaler_type: str = 'standard'):
+                 scaler_type: str = 'standard',
+                 use_group_feature: bool = False):
         """
-        Initializes the regression analysis class.
-        Adds XGBoost and configurable scaler.
+        Regression analysis class, now with XGBoost, optional group_col as feature,
+        one-hot encoding for all categoricals, and year_col always numeric.
         """
         self.df = df.copy()
         self.target_col = target_col
         self.group_col = group_col
         self.year_col = year_col
         self.holdout_years = holdout_years
-        self.rf_tune = rf_tune
         self.xgb_tune = xgb_tune
         self.scaler_type = scaler_type.lower()
-        self.rf_params = rf_params or dict(n_estimators=200, max_depth=None, random_state=42, n_jobs=-1)
-        self.rf_tune_params = rf_tune_params or {
-            'rf__n_estimators': [100, 200, 500],
-            'rf__max_depth': [None, 10, 20]
-        }
+        self.use_group_feature = use_group_feature
+
+        # XGBoost parameters
         self.xgb_params = xgb_params or dict(n_estimators=200, max_depth=6, learning_rate=0.1, random_state=42, n_jobs=-1, verbosity=0)
         self.xgb_tune_params = xgb_tune_params or {
             'xgb__n_estimators': [100, 200, 500],
             'xgb__max_depth': [4, 6, 10],
             'xgb__learning_rate': [0.05, 0.1, 0.2]
         }
-        # Infer features
+
+        # Always treat year_col as numeric feature
         non_feats = {self.group_col, self.year_col, self.target_col}
         if feature_cols is None:
-            self.feature_cols = [c for c in self.df.columns if c not in non_feats]
+            base_feats = [c for c in self.df.columns if c not in non_feats]
         else:
-            self.feature_cols = feature_cols
+            base_feats = feature_cols.copy()
+        # Ensure year_col included as numeric feature
+        if self.year_col not in base_feats:
+            base_feats.append(self.year_col)
+        # Optionally include group_col as a feature
+        if self.use_group_feature and self.group_col not in base_feats:
+            base_feats.append(self.group_col)
+        self.feature_cols = base_feats
+
+        # Determine which features are categorical (object or category dtype, or forced by OneHotEncoder)
+        self.categorical_features = [
+            col for col in self.feature_cols
+            if self.df[col].dtype == 'object' or self.df[col].dtype.name == 'category'
+            or (self.use_group_feature and col == self.group_col)
+        ]
+        # year_col is always numeric (ensure not in categoricals)
+        if self.year_col in self.categorical_features:
+            self.categorical_features.remove(self.year_col)
+        self.numeric_features = [
+            col for col in self.feature_cols if col not in self.categorical_features
+        ]
+
         # Split data
         years = self.df[self.year_col]
         cutoff = years.max() - self.holdout_years
@@ -72,8 +89,10 @@ class RegressionAnalysis:
         self.y_train = self.df.loc[train_mask, self.target_col]
         self.y_test  = self.df.loc[~train_mask, self.target_col]
         self.groups_train = self.df.loc[train_mask, self.group_col]
-        # Initialize pipelines
-        self._build_pipelines(tree_based_models_with_scaler)
+
+        # Build transformers and pipelines
+        self._build_transformers()
+        self._build_pipelines()
 
     def _get_scaler(self):
         if self.scaler_type == 'standard':
@@ -85,31 +104,33 @@ class RegressionAnalysis:
         else:
             raise ValueError(f"Unknown scaler_type: {self.scaler_type}")
 
-    def _build_pipelines(self, tree_based_models_with_scaler: bool = True):
-        scaler = self._get_scaler()
-        # ElasticNet always uses scaler
+    def _build_transformers(self):
+        # OneHot for categoricals, scale numeric
+        self.preprocessor = ColumnTransformer(
+            transformers=[
+                ('num', self._get_scaler(), self.numeric_features),
+                ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), self.categorical_features)
+            ]
+        )
+
+    def _build_pipelines(self):
+        # ElasticNet
         self.pipe_enet = Pipeline([
-            ('scaler', scaler),
+            ('pre', self.preprocessor),
             ('enet', ElasticNetCV(l1_ratio=[.2, .5, .8], cv=5, random_state=42, n_jobs=-1, max_iter=10000))
         ])
-        # Random Forest: scaler optional
-        if not tree_based_models_with_scaler:
-            base_rf = Pipeline([('rf', RandomForestRegressor(**self.rf_params))])
-        else:
-            base_rf = Pipeline([('scaler', scaler), ('rf', RandomForestRegressor(**self.rf_params))])
-        if self.rf_tune:
-            self.pipe_rf = GridSearchCV(base_rf,
-                                        param_grid=self.rf_tune_params,
-                                        cv=GroupKFold(n_splits=5),
-                                        scoring='neg_mean_absolute_error',
-                                        n_jobs=-1)
-        else:
-            self.pipe_rf = base_rf
-        # XGBoost: scaler optional
-        if not tree_based_models_with_scaler:
-            base_xgb = Pipeline([('xgb', XGBRegressor(**self.xgb_params))])
-        else:
-            base_xgb = Pipeline([('scaler', scaler), ('xgb', XGBRegressor(**self.xgb_params))])
+        # Random Forest
+        self.base_rf = Pipeline([
+            ('pre', self.preprocessor),
+            ('rf', RandomForestRegressor(**self.rf_params))
+        ])
+    
+
+        # XGBoost
+        base_xgb = Pipeline([
+            ('pre', self.preprocessor),
+            ('xgb', XGBRegressor(**self.xgb_params))
+        ])
         if self.xgb_tune:
             self.pipe_xgb = GridSearchCV(base_xgb,
                                          param_grid=self.xgb_tune_params,
@@ -223,14 +244,25 @@ class RegressionAnalysis:
             pipe = self.pipe_rf
             step = 'rf'
             title = 'Random Forest Feature Importances'
-        # Extract model from pipeline
+        # Extract fitted estimator from pipeline
         if isinstance(pipe, GridSearchCV):
             estimator = pipe.best_estimator_.named_steps[step]
         else:
             estimator = pipe.named_steps[step]
         importances = estimator.feature_importances_
+        # After ColumnTransformer and OneHot, feature names change:
+        feature_names = []
+        if hasattr(self.preprocessor, 'transformers_'):
+            # Get feature names after transform
+            num_feats = self.numeric_features
+            cat_encoder = self.preprocessor.named_transformers_['cat']
+            cat_feats = list(cat_encoder.get_feature_names_out(self.categorical_features))
+            feature_names = num_feats + cat_feats
+        else:
+            # fallback
+            feature_names = self.numeric_features + self.categorical_features
         indices = np.argsort(importances)[::-1]
-        labels = [self.feature_cols[i] for i in indices]
+        labels = [feature_names[i] for i in indices]
         if top_n:
             labels = labels[:top_n]
             importances = importances[indices][:top_n]
@@ -252,7 +284,7 @@ class RegressionAnalysis:
         self.fit()
         self.evaluate()
         if plot_importances:
-            self.plot_feature_importances(model=importances_model)
+            self.plot_feature_importances(model=importances_model, top_n=15)
         return None
 
 class EnsembleProjections:
