@@ -4,12 +4,13 @@ import matplotlib.pyplot as plt
 from typing import List, Any
 
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import ElasticNetCV, LinearRegression
 from sklearn.dummy import DummyRegressor
-from sklearn.model_selection import GroupKFold, TimeSeriesSplit, GridSearchCV, cross_val_score
-from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.model_selection import GroupKFold, TimeSeriesSplit, GridSearchCV, cross_val_score, train_test_split, RandomizedSearchCV, KFold, cross_validate
+from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
+from xgboost import XGBRegressor
 
 from scipy.stats import qmc
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
@@ -25,20 +26,17 @@ class RegressionAnalysis:
                  year_col: str,
                  feature_cols: list = None,
                  holdout_years: int = 5,
+                 tree_based_models_with_scaler: bool = True,
                  rf_params: dict = None,
                  rf_tune: bool = False,
-                 rf_tune_params: dict = None):
+                 rf_tune_params: dict = None,
+                 xgb_params: dict = None,
+                 xgb_tune: bool = False,
+                 xgb_tune_params: dict = None,
+                 scaler_type: str = 'standard'):
         """
         Initializes the regression analysis class.
-        df: DataFrame containing features, target, group and year columns
-        target_col: name of the target column
-        group_col: name of the grouping column (e.g., country)
-        year_col: name of the year column
-        feature_cols: list of feature column names; if None, auto-inferred
-        holdout_years: number of most recent years to hold out as test set
-        rf_params: default RF parameters
-        rf_tune: whether to perform tuning for RF
-        rf_tune_params: dict of parameters/grid for tuning
+        Adds XGBoost and configurable scaler.
         """
         self.df = df.copy()
         self.target_col = target_col
@@ -46,21 +44,26 @@ class RegressionAnalysis:
         self.year_col = year_col
         self.holdout_years = holdout_years
         self.rf_tune = rf_tune
-        self.rf_params = rf_params or dict(n_estimators=200, max_depth=None,
-                                           random_state=42, n_jobs=-1)
+        self.xgb_tune = xgb_tune
+        self.scaler_type = scaler_type.lower()
+        self.rf_params = rf_params or dict(n_estimators=200, max_depth=None, random_state=42, n_jobs=-1)
         self.rf_tune_params = rf_tune_params or {
             'rf__n_estimators': [100, 200, 500],
             'rf__max_depth': [None, 10, 20]
         }
-
-        # infer features
+        self.xgb_params = xgb_params or dict(n_estimators=200, max_depth=6, learning_rate=0.1, random_state=42, n_jobs=-1, verbosity=0)
+        self.xgb_tune_params = xgb_tune_params or {
+            'xgb__n_estimators': [100, 200, 500],
+            'xgb__max_depth': [4, 6, 10],
+            'xgb__learning_rate': [0.05, 0.1, 0.2]
+        }
+        # Infer features
         non_feats = {self.group_col, self.year_col, self.target_col}
         if feature_cols is None:
             self.feature_cols = [c for c in self.df.columns if c not in non_feats]
         else:
             self.feature_cols = feature_cols
-
-        # split data
+        # Split data
         years = self.df[self.year_col]
         cutoff = years.max() - self.holdout_years
         train_mask = years <= cutoff
@@ -69,19 +72,31 @@ class RegressionAnalysis:
         self.y_train = self.df.loc[train_mask, self.target_col]
         self.y_test  = self.df.loc[~train_mask, self.target_col]
         self.groups_train = self.df.loc[train_mask, self.group_col]
+        # Initialize pipelines
+        self._build_pipelines(tree_based_models_with_scaler)
 
-        # initialize pipelines
-        self._build_pipelines()
+    def _get_scaler(self):
+        if self.scaler_type == 'standard':
+            return StandardScaler()
+        elif self.scaler_type == 'minmax':
+            return MinMaxScaler()
+        elif self.scaler_type == 'robust':
+            return RobustScaler()
+        else:
+            raise ValueError(f"Unknown scaler_type: {self.scaler_type}")
 
-    def _build_pipelines(self):
-        # ElasticNet
+    def _build_pipelines(self, tree_based_models_with_scaler: bool = True):
+        scaler = self._get_scaler()
+        # ElasticNet always uses scaler
         self.pipe_enet = Pipeline([
-            ('scaler', StandardScaler()),
-            ('enet', ElasticNetCV(l1_ratio=[.2, .5, .8], cv=5,
-                                   random_state=42, n_jobs=-1, max_iter=10000))
+            ('scaler', scaler),
+            ('enet', ElasticNetCV(l1_ratio=[.2, .5, .8], cv=5, random_state=42, n_jobs=-1, max_iter=10000))
         ])
-        # Random Forest
-        base_rf = Pipeline([('rf', RandomForestRegressor(**self.rf_params))])
+        # Random Forest: scaler optional
+        if not tree_based_models_with_scaler:
+            base_rf = Pipeline([('rf', RandomForestRegressor(**self.rf_params))])
+        else:
+            base_rf = Pipeline([('scaler', scaler), ('rf', RandomForestRegressor(**self.rf_params))])
         if self.rf_tune:
             self.pipe_rf = GridSearchCV(base_rf,
                                         param_grid=self.rf_tune_params,
@@ -90,6 +105,19 @@ class RegressionAnalysis:
                                         n_jobs=-1)
         else:
             self.pipe_rf = base_rf
+        # XGBoost: scaler optional
+        if not tree_based_models_with_scaler:
+            base_xgb = Pipeline([('xgb', XGBRegressor(**self.xgb_params))])
+        else:
+            base_xgb = Pipeline([('scaler', scaler), ('xgb', XGBRegressor(**self.xgb_params))])
+        if self.xgb_tune:
+            self.pipe_xgb = GridSearchCV(base_xgb,
+                                         param_grid=self.xgb_tune_params,
+                                         cv=GroupKFold(n_splits=5),
+                                         scoring='neg_mean_absolute_error',
+                                         n_jobs=-1)
+        else:
+            self.pipe_xgb = base_xgb
         # Median baseline
         self.pipe_med = Pipeline([('median', DummyRegressor(strategy='median'))])
 
@@ -102,6 +130,7 @@ class RegressionAnalysis:
         gkf = GroupKFold(n_splits=5)
         tscv = TimeSeriesSplit(n_splits=5)
         for name, pipe in [('RandomForest', self.pipe_rf),
+                           ('XGBoost', self.pipe_xgb),
                            ('ElasticNet', self.pipe_enet),
                            ('Median', self.pipe_med)]:
             scores_group_mae = -cross_val_score(pipe, self.X_train, self.y_train,
@@ -132,12 +161,11 @@ class RegressionAnalysis:
                 'time_r2_mean': scores_time_r2.mean(),
                 'time_r2_std': scores_time_r2.std()
             }
-        # Print nicely formatted table
         print("\nCross-Validation Results:")
-        print("-" * 100)
+        print("-" * 120)
         print(f"{'Model':<15} {'Group MAE':>12} {'(std)':>8} {'Time MAE':>12} {'(std)':>8} "
               f"{'Group R2':>12} {'(std)':>8} {'Time R2':>12} {'(std)':>8}")
-        print("-" * 100)
+        print("-" * 120)
         for name, res in results.items():
             print(f"{name:<15} {res['group_mae_mean']:12.4f} {res['group_mae_std']:8.4f} "
                   f"{res['time_mae_mean']:12.4f} {res['time_mae_std']:8.4f} "
@@ -150,6 +178,7 @@ class RegressionAnalysis:
         Fit all models on the training data.
         """
         self.pipe_rf.fit(self.X_train, self.y_train)
+        self.pipe_xgb.fit(self.X_train, self.y_train)
         self.pipe_enet.fit(self.X_train, self.y_train)
         self.pipe_med.fit(self.X_train, self.y_train)
         return self
@@ -161,6 +190,7 @@ class RegressionAnalysis:
         """
         evals = {}
         for name, pipe in [('RandomForest', self.pipe_rf),
+                           ('XGBoost', self.pipe_xgb),
                            ('ElasticNet', self.pipe_enet),
                            ('Median', self.pipe_med)]:
             y_train_pred = pipe.predict(self.X_train)
@@ -171,44 +201,49 @@ class RegressionAnalysis:
                 'train_r2':  r2_score(self.y_train, y_train_pred),
                 'test_r2':   r2_score(self.y_test,  y_test_pred)
             }
-        # Print as a formatted table
         print("\nEvaluation Results:")
-        print("-" * 60)
+        print("-" * 80)
         print(f"{'Model':<15} {'Train MAE':>10} {'Test MAE':>10} {'Train R2':>10} {'Test R2':>10}")
-        print("-" * 60)
+        print("-" * 80)
         for name, metrics in evals.items():
             print(f"{name:<15} {metrics['train_mae']:10.4f} {metrics['test_mae']:10.4f} {metrics['train_r2']:10.4f} {metrics['test_r2']:10.4f}")
-        
         return None
 
-    def plot_feature_importances(self, top_n: int = None):
+    def plot_feature_importances(self, top_n: int = None, model: str = 'RandomForest'):
         """
-        Plot feature importances from the Random Forest model.
+        Plot feature importances from the Random Forest or XGBoost model.
+        Set model='XGBoost' to plot XGBoost importances.
         """
-        # extract RF from pipeline
-        rf = None
-        if isinstance(self.pipe_rf, GridSearchCV):
-            rf = self.pipe_rf.best_estimator_.named_steps['rf']
+        pipe = None
+        if model.lower() == 'xgboost':
+            pipe = self.pipe_xgb
+            step = 'xgb'
+            title = 'XGBoost Feature Importances'
         else:
-            rf = self.pipe_rf.named_steps['rf']
-
-        importances = rf.feature_importances_
+            pipe = self.pipe_rf
+            step = 'rf'
+            title = 'Random Forest Feature Importances'
+        # Extract model from pipeline
+        if isinstance(pipe, GridSearchCV):
+            estimator = pipe.best_estimator_.named_steps[step]
+        else:
+            estimator = pipe.named_steps[step]
+        importances = estimator.feature_importances_
         indices = np.argsort(importances)[::-1]
         labels = [self.feature_cols[i] for i in indices]
         if top_n:
             labels = labels[:top_n]
             importances = importances[indices][:top_n]
             indices = indices[:top_n]
-
         plt.figure(figsize=(8,6))
         plt.barh(range(len(importances)), importances[::-1])
         plt.yticks(range(len(importances)), labels[::-1])
         plt.xlabel('Importance')
-        plt.title('Random Forest Feature Importances')
+        plt.title(title)
         plt.tight_layout()
         plt.show()
 
-    def run_all(self, plot_importances: bool = True) -> dict:
+    def run_all(self, plot_importances: bool = True, importances_model: str = 'RandomForest') -> dict:
         """
         Utility to run CV, fit, evaluate, and optionally plot.
         Returns a summary dict.
@@ -217,7 +252,7 @@ class RegressionAnalysis:
         self.fit()
         self.evaluate()
         if plot_importances:
-            self.plot_feature_importances()
+            self.plot_feature_importances(model=importances_model)
         return None
 
 class EnsembleProjections:
