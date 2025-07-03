@@ -5,6 +5,7 @@ import numpy as np
 import logging
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.tools.tools import add_constant
+from scipy.stats import zscore
 
 
 # Configure the logger
@@ -390,6 +391,13 @@ class EDAUtils:
         plt.xticks(rotation=45)
         plt.tight_layout()
         plt.show()
+    
+    @staticmethod
+    def find_outlier_columns(df, z_thresh=3.0):
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        zs = df[numeric_cols].apply(zscore).abs()
+        outlier_pct = (zs > z_thresh).sum() / len(df) * 100
+        return outlier_pct[outlier_pct > 0].to_dict()
 
     
 class DataCleaningUtils:

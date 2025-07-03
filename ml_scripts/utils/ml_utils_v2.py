@@ -4,12 +4,14 @@ import matplotlib.pyplot as plt
 from typing import List, Any
 
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, OneHotEncoder
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import ElasticNetCV, LinearRegression
 from sklearn.dummy import DummyRegressor
-from sklearn.model_selection import GroupKFold, TimeSeriesSplit, GridSearchCV, cross_val_score
-from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.model_selection import GroupKFold, TimeSeriesSplit, GridSearchCV, cross_val_score, train_test_split, RandomizedSearchCV, KFold, cross_validate
+from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
+from sklearn.compose import ColumnTransformer
+from xgboost import XGBRegressor
 
 from scipy.stats import qmc
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
@@ -25,42 +27,57 @@ class RegressionAnalysis:
                  year_col: str,
                  feature_cols: list = None,
                  holdout_years: int = 5,
+                 xgb_params: dict = None,
                  rf_params: dict = None,
-                 rf_tune: bool = False,
-                 rf_tune_params: dict = None):
+                 scaler_type: str = 'standard',
+                 use_group_feature: bool = False):
         """
-        Initializes the regression analysis class.
-        df: DataFrame containing features, target, group and year columns
-        target_col: name of the target column
-        group_col: name of the grouping column (e.g., country)
-        year_col: name of the year column
-        feature_cols: list of feature column names; if None, auto-inferred
-        holdout_years: number of most recent years to hold out as test set
-        rf_params: default RF parameters
-        rf_tune: whether to perform tuning for RF
-        rf_tune_params: dict of parameters/grid for tuning
+        Regression analysis class, now with XGBoost, optional group_col as feature,
+        one-hot encoding for all categoricals, and year_col always numeric.
         """
         self.df = df.copy()
         self.target_col = target_col
         self.group_col = group_col
         self.year_col = year_col
         self.holdout_years = holdout_years
-        self.rf_tune = rf_tune
-        self.rf_params = rf_params or dict(n_estimators=200, max_depth=None,
-                                           random_state=42, n_jobs=-1)
-        self.rf_tune_params = rf_tune_params or {
-            'rf__n_estimators': [100, 200, 500],
-            'rf__max_depth': [None, 10, 20]
-        }
+        self.scaler_type = scaler_type.lower()
+        self.use_group_feature = use_group_feature
 
-        # infer features
+        # Random Forest parameters
+        self.rf_params = rf_params or dict(n_estimators=200, max_depth=None, random_state=42, n_jobs=-1)
+
+        
+        # XGBoost parameters
+        self.xgb_params = xgb_params or dict(n_estimators=200, max_depth=6, learning_rate=0.1, random_state=42, n_jobs=-1, verbosity=0)
+    
+        # Always treat year_col as numeric feature
         non_feats = {self.group_col, self.year_col, self.target_col}
         if feature_cols is None:
-            self.feature_cols = [c for c in self.df.columns if c not in non_feats]
+            base_feats = [c for c in self.df.columns if c not in non_feats]
         else:
-            self.feature_cols = feature_cols
+            base_feats = feature_cols.copy()
+        # Ensure year_col included as numeric feature
+        if self.year_col not in base_feats:
+            base_feats.append(self.year_col)
+        # Optionally include group_col as a feature
+        if self.use_group_feature and self.group_col not in base_feats:
+            base_feats.append(self.group_col)
+        self.feature_cols = base_feats
 
-        # split data
+        # Determine which features are categorical (object or category dtype, or forced by OneHotEncoder)
+        self.categorical_features = [
+            col for col in self.feature_cols
+            if self.df[col].dtype == 'object' or self.df[col].dtype.name == 'category'
+            or (self.use_group_feature and col == self.group_col)
+        ]
+        # year_col is always numeric (ensure not in categoricals)
+        if self.year_col in self.categorical_features:
+            self.categorical_features.remove(self.year_col)
+        self.numeric_features = [
+            col for col in self.feature_cols if col not in self.categorical_features
+        ]
+
+        # Split data
         years = self.df[self.year_col]
         cutoff = years.max() - self.holdout_years
         train_mask = years <= cutoff
@@ -70,26 +87,48 @@ class RegressionAnalysis:
         self.y_test  = self.df.loc[~train_mask, self.target_col]
         self.groups_train = self.df.loc[train_mask, self.group_col]
 
-        # initialize pipelines
+        # Build transformers and pipelines
+        self._build_transformers()
         self._build_pipelines()
+
+    def _get_scaler(self):
+        if self.scaler_type == 'standard':
+            return StandardScaler()
+        elif self.scaler_type == 'minmax':
+            return MinMaxScaler()
+        elif self.scaler_type == 'robust':
+            return RobustScaler()
+        else:
+            raise ValueError(f"Unknown scaler_type: {self.scaler_type}")
+
+    def _build_transformers(self):
+        # OneHot for categoricals, scale numeric
+        self.preprocessor = ColumnTransformer(
+            transformers=[
+                ('num', self._get_scaler(), self.numeric_features),
+                ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), self.categorical_features)
+            ]
+        )
 
     def _build_pipelines(self):
         # ElasticNet
         self.pipe_enet = Pipeline([
-            ('scaler', StandardScaler()),
-            ('enet', ElasticNetCV(l1_ratio=[.2, .5, .8], cv=5,
-                                   random_state=42, n_jobs=-1, max_iter=10000))
+            ('pre', self.preprocessor),
+            ('enet', ElasticNetCV(l1_ratio=[.2, .5, .8], cv=5, random_state=42, n_jobs=-1, max_iter=10000))
         ])
         # Random Forest
-        base_rf = Pipeline([('rf', RandomForestRegressor(**self.rf_params))])
-        if self.rf_tune:
-            self.pipe_rf = GridSearchCV(base_rf,
-                                        param_grid=self.rf_tune_params,
-                                        cv=GroupKFold(n_splits=5),
-                                        scoring='neg_mean_absolute_error',
-                                        n_jobs=-1)
-        else:
-            self.pipe_rf = base_rf
+        self.pipe_rf = Pipeline([
+            ('pre', self.preprocessor),
+            ('rf', RandomForestRegressor(**self.rf_params))
+        ])
+    
+
+        # XGBoost
+        self.pipe_xgb = Pipeline([
+            ('pre', self.preprocessor),
+            ('xgb', XGBRegressor(**self.xgb_params))
+        ])
+
         # Median baseline
         self.pipe_med = Pipeline([('median', DummyRegressor(strategy='median'))])
 
@@ -102,6 +141,7 @@ class RegressionAnalysis:
         gkf = GroupKFold(n_splits=5)
         tscv = TimeSeriesSplit(n_splits=5)
         for name, pipe in [('RandomForest', self.pipe_rf),
+                           ('XGBoost', self.pipe_xgb),
                            ('ElasticNet', self.pipe_enet),
                            ('Median', self.pipe_med)]:
             scores_group_mae = -cross_val_score(pipe, self.X_train, self.y_train,
@@ -132,12 +172,11 @@ class RegressionAnalysis:
                 'time_r2_mean': scores_time_r2.mean(),
                 'time_r2_std': scores_time_r2.std()
             }
-        # Print nicely formatted table
         print("\nCross-Validation Results:")
-        print("-" * 100)
+        print("-" * 120)
         print(f"{'Model':<15} {'Group MAE':>12} {'(std)':>8} {'Time MAE':>12} {'(std)':>8} "
               f"{'Group R2':>12} {'(std)':>8} {'Time R2':>12} {'(std)':>8}")
-        print("-" * 100)
+        print("-" * 120)
         for name, res in results.items():
             print(f"{name:<15} {res['group_mae_mean']:12.4f} {res['group_mae_std']:8.4f} "
                   f"{res['time_mae_mean']:12.4f} {res['time_mae_std']:8.4f} "
@@ -150,6 +189,7 @@ class RegressionAnalysis:
         Fit all models on the training data.
         """
         self.pipe_rf.fit(self.X_train, self.y_train)
+        self.pipe_xgb.fit(self.X_train, self.y_train)
         self.pipe_enet.fit(self.X_train, self.y_train)
         self.pipe_med.fit(self.X_train, self.y_train)
         return self
@@ -161,6 +201,7 @@ class RegressionAnalysis:
         """
         evals = {}
         for name, pipe in [('RandomForest', self.pipe_rf),
+                           ('XGBoost', self.pipe_xgb),
                            ('ElasticNet', self.pipe_enet),
                            ('Median', self.pipe_med)]:
             y_train_pred = pipe.predict(self.X_train)
@@ -171,44 +212,60 @@ class RegressionAnalysis:
                 'train_r2':  r2_score(self.y_train, y_train_pred),
                 'test_r2':   r2_score(self.y_test,  y_test_pred)
             }
-        # Print as a formatted table
         print("\nEvaluation Results:")
-        print("-" * 60)
+        print("-" * 80)
         print(f"{'Model':<15} {'Train MAE':>10} {'Test MAE':>10} {'Train R2':>10} {'Test R2':>10}")
-        print("-" * 60)
+        print("-" * 80)
         for name, metrics in evals.items():
             print(f"{name:<15} {metrics['train_mae']:10.4f} {metrics['test_mae']:10.4f} {metrics['train_r2']:10.4f} {metrics['test_r2']:10.4f}")
-        
         return None
 
-    def plot_feature_importances(self, top_n: int = None):
+    def plot_feature_importances(self, top_n: int = None, model: str = 'RandomForest'):
         """
-        Plot feature importances from the Random Forest model.
+        Plot feature importances from the Random Forest or XGBoost model.
+        Set model='XGBoost' to plot XGBoost importances.
         """
-        # extract RF from pipeline
-        rf = None
-        if isinstance(self.pipe_rf, GridSearchCV):
-            rf = self.pipe_rf.best_estimator_.named_steps['rf']
+        pipe = None
+        if model.lower() == 'xgboost':
+            pipe = self.pipe_xgb
+            step = 'xgb'
+            title = 'XGBoost Feature Importances'
         else:
-            rf = self.pipe_rf.named_steps['rf']
-
-        importances = rf.feature_importances_
+            pipe = self.pipe_rf
+            step = 'rf'
+            title = 'Random Forest Feature Importances'
+        # Extract fitted estimator from pipeline
+        if isinstance(pipe, GridSearchCV):
+            estimator = pipe.best_estimator_.named_steps[step]
+        else:
+            estimator = pipe.named_steps[step]
+        importances = estimator.feature_importances_
+        # After ColumnTransformer and OneHot, feature names change:
+        feature_names = []
+        if hasattr(self.preprocessor, 'transformers_'):
+            # Get feature names after transform
+            num_feats = self.numeric_features
+            cat_encoder = self.preprocessor.named_transformers_['cat']
+            cat_feats = list(cat_encoder.get_feature_names_out(self.categorical_features))
+            feature_names = num_feats + cat_feats
+        else:
+            # fallback
+            feature_names = self.numeric_features + self.categorical_features
         indices = np.argsort(importances)[::-1]
-        labels = [self.feature_cols[i] for i in indices]
+        labels = [feature_names[i] for i in indices]
         if top_n:
             labels = labels[:top_n]
             importances = importances[indices][:top_n]
             indices = indices[:top_n]
-
         plt.figure(figsize=(8,6))
         plt.barh(range(len(importances)), importances[::-1])
         plt.yticks(range(len(importances)), labels[::-1])
         plt.xlabel('Importance')
-        plt.title('Random Forest Feature Importances')
+        plt.title(title)
         plt.tight_layout()
         plt.show()
 
-    def run_all(self, plot_importances: bool = True) -> dict:
+    def run_all(self, plot_importances: bool = True, importances_model: str = 'RandomForest') -> dict:
         """
         Utility to run CV, fit, evaluate, and optionally plot.
         Returns a summary dict.
@@ -217,7 +274,7 @@ class RegressionAnalysis:
         self.fit()
         self.evaluate()
         if plot_importances:
-            self.plot_feature_importances()
+            self.plot_feature_importances(model=importances_model, top_n=15)
         return None
 
 class EnsembleProjections:
@@ -532,4 +589,53 @@ class EnsembleProjections:
         if exponentiate:
             df["total_emissions"] = np.exp(df["log_total_emissions"])
 
+        return df
+    
+    @staticmethod
+    def calibrate_total_emissions(
+        simulated_df: pd.DataFrame,
+        initial_emissions_df: pd.DataFrame,
+        base_year: int = 2022,
+        adjustment_method: str = "additive"  # or "multiplicative"
+    ) -> pd.DataFrame:
+        """
+        Calibrates the 'total_emissions' column in simulated_df using initial emissions values.
+
+        Parameters:
+        - simulated_df: DataFrame with time series simulation (must include 'total_emissions').
+        - initial_emissions_df: DataFrame with columns ['iso_alpha_3', 'year', 'total_emissions'] for base year.
+        - base_year: The year to anchor calibration (default 2022).
+        - adjustment_method: Either 'additive' or 'multiplicative'.
+
+        Returns:
+        - A copy of simulated_df with calibrated 'total_emissions'.
+        """
+        # Filter simulation for base year values
+        base_sim = simulated_df[simulated_df["year"] == base_year][["future_id", "iso_alpha_3", "total_emissions"]]
+        base_sim = base_sim.rename(columns={"total_emissions": "sim_base_emissions"})
+
+        # Merge simulation base emissions into full simulation
+        df = simulated_df.merge(base_sim[["future_id", "sim_base_emissions"]], on="future_id", how="left")
+
+        # Prepare initial conditions lookup
+        init_emissions = initial_emissions_df.set_index("iso_alpha_3")["total_emissions"].to_dict()
+
+        # Apply calibration
+        if adjustment_method == "additive":
+            df["total_emissions"] = df.apply(
+                lambda row: init_emissions.get(row["iso_alpha_3"], np.nan) +
+                            (row["total_emissions"] - row["sim_base_emissions"]),
+                axis=1
+            )
+        elif adjustment_method == "multiplicative":
+            df["total_emissions"] = df.apply(
+                lambda row: init_emissions.get(row["iso_alpha_3"], np.nan) *
+                            (row["total_emissions"] / row["sim_base_emissions"]) if row["sim_base_emissions"] != 0 else np.nan,
+                axis=1
+            )
+        else:
+            raise ValueError("adjustment_method must be either 'additive' or 'multiplicative'")
+
+        # Clean up and return
+        df.drop(columns=["sim_base_emissions"], inplace=True)
         return df
