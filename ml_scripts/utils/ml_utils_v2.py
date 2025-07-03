@@ -28,8 +28,7 @@ class RegressionAnalysis:
                  feature_cols: list = None,
                  holdout_years: int = 5,
                  xgb_params: dict = None,
-                 xgb_tune: bool = False,
-                 xgb_tune_params: dict = None,
+                 rf_params: dict = None,
                  scaler_type: str = 'standard',
                  use_group_feature: bool = False):
         """
@@ -41,18 +40,16 @@ class RegressionAnalysis:
         self.group_col = group_col
         self.year_col = year_col
         self.holdout_years = holdout_years
-        self.xgb_tune = xgb_tune
         self.scaler_type = scaler_type.lower()
         self.use_group_feature = use_group_feature
 
+        # Random Forest parameters
+        self.rf_params = rf_params or dict(n_estimators=200, max_depth=None, random_state=42, n_jobs=-1)
+
+        
         # XGBoost parameters
         self.xgb_params = xgb_params or dict(n_estimators=200, max_depth=6, learning_rate=0.1, random_state=42, n_jobs=-1, verbosity=0)
-        self.xgb_tune_params = xgb_tune_params or {
-            'xgb__n_estimators': [100, 200, 500],
-            'xgb__max_depth': [4, 6, 10],
-            'xgb__learning_rate': [0.05, 0.1, 0.2]
-        }
-
+    
         # Always treat year_col as numeric feature
         non_feats = {self.group_col, self.year_col, self.target_col}
         if feature_cols is None:
@@ -120,25 +117,18 @@ class RegressionAnalysis:
             ('enet', ElasticNetCV(l1_ratio=[.2, .5, .8], cv=5, random_state=42, n_jobs=-1, max_iter=10000))
         ])
         # Random Forest
-        self.base_rf = Pipeline([
+        self.pipe_rf = Pipeline([
             ('pre', self.preprocessor),
             ('rf', RandomForestRegressor(**self.rf_params))
         ])
     
 
         # XGBoost
-        base_xgb = Pipeline([
+        self.pipe_xgb = Pipeline([
             ('pre', self.preprocessor),
             ('xgb', XGBRegressor(**self.xgb_params))
         ])
-        if self.xgb_tune:
-            self.pipe_xgb = GridSearchCV(base_xgb,
-                                         param_grid=self.xgb_tune_params,
-                                         cv=GroupKFold(n_splits=5),
-                                         scoring='neg_mean_absolute_error',
-                                         n_jobs=-1)
-        else:
-            self.pipe_xgb = base_xgb
+
         # Median baseline
         self.pipe_med = Pipeline([('median', DummyRegressor(strategy='median'))])
 
@@ -599,4 +589,53 @@ class EnsembleProjections:
         if exponentiate:
             df["total_emissions"] = np.exp(df["log_total_emissions"])
 
+        return df
+    
+    @staticmethod
+    def calibrate_total_emissions(
+        simulated_df: pd.DataFrame,
+        initial_emissions_df: pd.DataFrame,
+        base_year: int = 2022,
+        adjustment_method: str = "additive"  # or "multiplicative"
+    ) -> pd.DataFrame:
+        """
+        Calibrates the 'total_emissions' column in simulated_df using initial emissions values.
+
+        Parameters:
+        - simulated_df: DataFrame with time series simulation (must include 'total_emissions').
+        - initial_emissions_df: DataFrame with columns ['iso_alpha_3', 'year', 'total_emissions'] for base year.
+        - base_year: The year to anchor calibration (default 2022).
+        - adjustment_method: Either 'additive' or 'multiplicative'.
+
+        Returns:
+        - A copy of simulated_df with calibrated 'total_emissions'.
+        """
+        # Filter simulation for base year values
+        base_sim = simulated_df[simulated_df["year"] == base_year][["future_id", "iso_alpha_3", "total_emissions"]]
+        base_sim = base_sim.rename(columns={"total_emissions": "sim_base_emissions"})
+
+        # Merge simulation base emissions into full simulation
+        df = simulated_df.merge(base_sim[["future_id", "sim_base_emissions"]], on="future_id", how="left")
+
+        # Prepare initial conditions lookup
+        init_emissions = initial_emissions_df.set_index("iso_alpha_3")["total_emissions"].to_dict()
+
+        # Apply calibration
+        if adjustment_method == "additive":
+            df["total_emissions"] = df.apply(
+                lambda row: init_emissions.get(row["iso_alpha_3"], np.nan) +
+                            (row["total_emissions"] - row["sim_base_emissions"]),
+                axis=1
+            )
+        elif adjustment_method == "multiplicative":
+            df["total_emissions"] = df.apply(
+                lambda row: init_emissions.get(row["iso_alpha_3"], np.nan) *
+                            (row["total_emissions"] / row["sim_base_emissions"]) if row["sim_base_emissions"] != 0 else np.nan,
+                axis=1
+            )
+        else:
+            raise ValueError("adjustment_method must be either 'additive' or 'multiplicative'")
+
+        # Clean up and return
+        df.drop(columns=["sim_base_emissions"], inplace=True)
         return df
