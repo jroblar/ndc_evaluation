@@ -8,20 +8,12 @@
 
 ## 🚀 Getting Started
 
-### 1. Create the Environment
+**Run:**
 
-```bash
-conda create -n etpe_env python=3.11
-conda activate etpe_env
-```
-
-### 2. Install Dependencies
-
-Inside the project folder, run:
-
-```bash
-pip install -r requirements.txt
-```
+   ```bash
+   conda env create -f environment.yml
+   conda activate etpe_env
+   ```
 
 ## 📁 Important Files and Structure
 
