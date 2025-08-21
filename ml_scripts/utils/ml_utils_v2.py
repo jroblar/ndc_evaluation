@@ -20,6 +20,13 @@ import warnings
 from statsmodels.tools.sm_exceptions import ConvergenceWarning
 from pmdarima import auto_arima
 
+# Suppress warnings
+warnings.filterwarnings(
+    "ignore",
+    message="'force_all_finite' was renamed to 'ensure_all_finite'",
+    category=FutureWarning,          
+    module=r"sklearn"                # just sklearn
+)
 
 class RegressionAnalysis:
     def __init__(self,
@@ -48,7 +55,6 @@ class RegressionAnalysis:
         # Random Forest parameters
         self.rf_params = rf_params or dict(n_estimators=200, max_depth=None, random_state=42, n_jobs=-1)
 
-        
         # XGBoost parameters
         self.xgb_params = xgb_params or dict(n_estimators=200, max_depth=6, learning_rate=0.1, random_state=42, n_jobs=-1, verbosity=0)
     
@@ -348,7 +354,7 @@ class EnsembleProjections:
                         seasonal=False,
                         stepwise=True,
                         suppress_warnings=True,
-                        max_p=max_p, max_d=max_d, max_q=max_q,
+                        max_p=max_p, max_d=1, max_q=max_q,
                         error_action='ignore'
                     )
                     order = arima_model.order
@@ -360,8 +366,8 @@ class EnsembleProjections:
                 sar = SARIMAX(
                     hist,
                     order=order,
-                    enforce_stationarity=False,
-                    enforce_invertibility=False
+                    enforce_stationarity=False, # por que?
+                    enforce_invertibility=False # por que?
                 )
                 with warnings.catch_warnings():
                     warnings.filterwarnings(
@@ -370,7 +376,7 @@ class EnsembleProjections:
                     )
                     warnings.filterwarnings(
                         "ignore",
-                        message="Non-invertible starting MA parameters"
+                        message="Non-invertible starting MA parameters" 
                     )
                     warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
@@ -399,8 +405,8 @@ class EnsembleProjections:
                     row = {"iso_alpha_3": iso, "future_id": fid, "year": year}
                     for j, feat in enumerate(feature_cols):
                         sim_i = idx[s, j]
-                        row[feat] = sims_dict[feat][sim_i, t]
-                    rows.append(row)
+                        row[feat] = sims_dict[feat][sim_i, t] # Seguros de que este es el LHC que queremos? No estoy seguro de que tenga mucha variabilidad, debe tender asintotimante a los intervalos exactos
+                    rows.append(row) 
 
         result = pd.DataFrame(rows)
         return result[["iso_alpha_3", "future_id", "year"] + feature_cols]
