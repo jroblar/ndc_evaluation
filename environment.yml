@@ -14,6 +14,7 @@ dependencies:
   - statsmodels>=0.14
   - pmdarima>=2.0,<2.3
   - joblib>=1.2
+  - pyarrow
   - pip
   - notebook
   - pip:
