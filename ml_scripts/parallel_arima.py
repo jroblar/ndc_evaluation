@@ -120,7 +120,7 @@ def generate_ensemble_arima_parallel(
 
 ### Running the script
 
-SCRIPT_DIR_PATH = os.getcwd()
+SCRIPT_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR_PATH = os.path.dirname(SCRIPT_DIR_PATH)
 DATA_DIR_PATH = os.path.join(ROOT_DIR_PATH, "data")
 PROCESSED_DATA_DIR_PATH = os.path.join(DATA_DIR_PATH, "processed_data")
