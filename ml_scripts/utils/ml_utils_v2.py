@@ -19,6 +19,7 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 import warnings
 from statsmodels.tools.sm_exceptions import ConvergenceWarning
 from pmdarima import auto_arima
+from typing import Dict, Iterable, Optional, Union
 
 # Suppress warnings
 warnings.filterwarnings(
@@ -559,4 +560,141 @@ class EnsembleProjections:
 
         # Clean up and return
         df.drop(columns=["sim_base_emissions"], inplace=True)
+        return df
+    
+    @staticmethod
+    def calibrate_to_initial_conditions(
+        simulated_df: pd.DataFrame,
+        initial_conditions_df: pd.DataFrame,
+        base_year: int = 2022,
+        columns: Optional[Iterable[str]] = None,
+        col_map: Optional[Dict[str, str]] = None,
+        adjustment_method: Union[str, Dict[str, str]] = "multiplicative",
+        update_logs: bool = True,
+        log_prefix: str = "log_",
+        epsilon: float = 1e-12,
+    ) -> pd.DataFrame:
+        """
+        Calibrate selected feature columns in `simulated_df` so that, for each future (future_id),
+        the base-year values match those in `initial_conditions_df` (keyed by iso_alpha_3, year=base_year).
+        Then propagate the SAME additive or multiplicative deviation across all years.
+
+        Parameters
+        ----------
+        simulated_df : pd.DataFrame
+            Must include ['iso_alpha_3','future_id','year'] and the feature columns to adjust.
+        initial_conditions_df : pd.DataFrame
+            Must include ['iso_alpha_3','year'] and base-year values for selected features.
+        base_year : int
+            Anchor year (default 2022).
+        columns : iterable[str] | None
+            Which *initial* columns to align. Defaults to the intersection of feature columns
+            (excluding keys) present in both dataframes.
+        col_map : dict[str,str] | None
+            Optional mapping {init_col -> sim_col} if column names differ between the two frames.
+            By default it assumes the same names in both.
+        adjustment_method : {"additive","multiplicative"} or dict[str, {"additive","multiplicative"}]
+            Either a single method for all columns or a per-column map.
+            Tip: use "additive" for growth rates, "multiplicative" for level variables.
+        update_logs : bool
+            If True, recompute matching log columns (e.g., 'log_pop_total' from 'pop_total').
+            Values <= 0 will produce NaN in the log.
+        log_prefix : str
+            Prefix used for log columns in `simulated_df`.
+        epsilon : float
+            Small constant to avoid division by zero in multiplicative adjustment.
+
+        Returns
+        -------
+        pd.DataFrame
+            A copy of `simulated_df` with calibrated columns (and optional log columns) updated.
+        """
+        required_sim_cols = {"iso_alpha_3", "future_id", "year"}
+        if not required_sim_cols.issubset(simulated_df.columns):
+            missing = required_sim_cols - set(simulated_df.columns)
+            raise ValueError(f"`simulated_df` is missing required columns: {missing}")
+
+        required_init_cols = {"iso_alpha_3", "year"}
+        if not required_init_cols.issubset(initial_conditions_df.columns):
+            missing = required_init_cols - set(initial_conditions_df.columns)
+            raise ValueError(f"`initial_conditions_df` is missing required columns: {missing}")
+
+        # Filter initial conditions to the base year and drop duplicates on iso
+        init_base = (
+            initial_conditions_df[initial_conditions_df["year"] == base_year]
+            .drop_duplicates(subset=["iso_alpha_3"])
+            .set_index("iso_alpha_3")
+        )
+
+        # Decide which columns to calibrate
+        # (exclude key columns from consideration)
+        if columns is None:
+            exclude = {"iso_alpha_3", "year"}
+            candidate_cols = [c for c in init_base.columns if c not in exclude]
+            columns = [c for c in candidate_cols if c in simulated_df.columns]
+
+        if len(columns) == 0:
+            # Nothing to do
+            return simulated_df.copy()
+
+        # Optional mapping: init_col -> sim_col (default: identity)
+        col_map = col_map or {c: c for c in columns}
+
+        # Extract base-year simulated values per future_id
+        base_sim = (
+            simulated_df.loc[simulated_df["year"] == base_year, ["future_id", "iso_alpha_3"] + list(col_map.values())]
+            .copy()
+        )
+        # Rename sim base columns: sim_base_<sim_col>
+        base_rename = {sim_col: f"sim_base__{sim_col}" for sim_col in col_map.values()}
+        base_sim.rename(columns=base_rename, inplace=True)
+
+        # Merge base sim baselines into all rows by future_id
+        df = simulated_df.merge(base_sim[["future_id"] + list(base_rename.values())], on="future_id", how="left")
+
+        def method_for(col: str) -> str:
+            if isinstance(adjustment_method, dict):
+                return adjustment_method.get(col, "multiplicative")
+            return adjustment_method
+
+        # Calibrate per column
+        for init_col, sim_col in col_map.items():
+            if init_col not in init_base.columns:
+                # Skip silently if init col not present in base init df
+                continue
+            if sim_col not in df.columns:
+                continue
+
+            # Lookup initial base value by iso for the whole df (align via index)
+            init_vals = df["iso_alpha_3"].map(init_base[init_col])
+
+            sim_base_col = f"sim_base__{sim_col}"
+            if sim_base_col not in df.columns:
+                # No baseline for this future_id -> cannot calibrate; skip
+                continue
+
+            m = method_for(init_col).lower()
+            if m not in {"additive", "multiplicative"}:
+                raise ValueError(f"Invalid method '{m}' for column '{init_col}'. Use 'additive' or 'multiplicative'.")
+
+            if m == "additive":
+                # new = init + (cur - base)
+                df[sim_col] = init_vals + (df[sim_col] - df[sim_base_col])
+            else:
+                # new = init * (cur / base)
+                denom = np.where(np.isfinite(df[sim_base_col]) & (np.abs(df[sim_base_col]) > 0), df[sim_base_col], np.nan)
+                ratio = df[sim_col] / denom
+                df[sim_col] = init_vals * ratio
+
+            # Optional: update corresponding log column if present
+            if update_logs:
+                log_col = f"{log_prefix}{sim_col}" if not sim_col.startswith(log_prefix) else sim_col
+                # Only recompute if a separate log column exists
+                if log_col in df.columns and log_col != sim_col:
+                    # Guard: log undefined for <= 0 -> set NaN
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        df[log_col] = np.where(df[sim_col] > 0, np.log(df[sim_col]), np.nan)
+
+        # Drop baseline helper columns
+        df.drop(columns=[c for c in df.columns if c.startswith("sim_base__")], inplace=True)
         return df
