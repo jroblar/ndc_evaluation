@@ -143,55 +143,93 @@ class RegressionAnalysis:
 
     def cross_validate(self):
         """
-        Perform GroupKFold and TimeSeriesSplit cross-validation on training data.
+        Perform cross-validation on training data.
+        - If use_group_feature is False: run GroupKFold (by country) + TimeSeriesSplit.
+        - If use_group_feature is True: SKIP GroupKFold to avoid leakage; run only TimeSeriesSplit.
         Prints CV results in a formatted table, including MAE and R2.
         """
         results = {}
-        gkf = GroupKFold(n_splits=5)
+        run_group_cv = not self.use_group_feature  # only do group-based CV when iso_alpha_3 is NOT a feature
+
+        if run_group_cv:
+            gkf = GroupKFold(n_splits=5)
         tscv = TimeSeriesSplit(n_splits=5)
-        for name, pipe in [('RandomForest', self.pipe_rf),
-                           ('XGBoost', self.pipe_xgb),
-                           ('ElasticNet', self.pipe_enet),
-                           ('Median', self.pipe_med)]:
-            scores_group_mae = -cross_val_score(pipe, self.X_train, self.y_train,
-                                                groups=self.groups_train,
-                                                cv=gkf,
-                                                scoring='neg_mean_absolute_error',
-                                                n_jobs=-1)
-            scores_time_mae = -cross_val_score(pipe, self.X_train, self.y_train,
-                                               cv=tscv,
-                                               scoring='neg_mean_absolute_error',
-                                               n_jobs=-1)
-            scores_group_r2 = cross_val_score(pipe, self.X_train, self.y_train,
-                                              groups=self.groups_train,
-                                              cv=gkf,
-                                              scoring='r2',
-                                              n_jobs=-1)
-            scores_time_r2 = cross_val_score(pipe, self.X_train, self.y_train,
-                                             cv=tscv,
-                                             scoring='r2',
-                                             n_jobs=-1)
-            results[name] = {
-                'group_mae_mean': scores_group_mae.mean(),
-                'group_mae_std': scores_group_mae.std(),
-                'time_mae_mean': scores_time_mae.mean(),
-                'time_mae_std': scores_time_mae.std(),
-                'group_r2_mean': scores_group_r2.mean(),
-                'group_r2_std': scores_group_r2.std(),
-                'time_r2_mean': scores_time_r2.mean(),
-                'time_r2_std': scores_time_r2.std()
-            }
-        print("\nCross-Validation Results:")
-        print("-" * 120)
-        print(f"{'Model':<15} {'Group MAE':>12} {'(std)':>8} {'Time MAE':>12} {'(std)':>8} "
-              f"{'Group R2':>12} {'(std)':>8} {'Time R2':>12} {'(std)':>8}")
-        print("-" * 120)
-        for name, res in results.items():
-            print(f"{name:<15} {res['group_mae_mean']:12.4f} {res['group_mae_std']:8.4f} "
-                  f"{res['time_mae_mean']:12.4f} {res['time_mae_std']:8.4f} "
-                  f"{res['group_r2_mean']:12.4f} {res['group_r2_std']:8.4f} "
-                  f"{res['time_r2_mean']:12.4f} {res['time_r2_std']:8.4f}")
+
+        models = [
+            ('RandomForest', self.pipe_rf),
+            ('XGBoost',      self.pipe_xgb),
+            ('ElasticNet',   self.pipe_enet),
+            ('Median',       self.pipe_med),
+        ]
+
+        for name, pipe in models:
+            # Time-based CV (always)
+            scores_time_mae = -cross_val_score(
+                pipe, self.X_train, self.y_train,
+                cv=tscv, scoring='neg_mean_absolute_error', n_jobs=-1
+            )
+            scores_time_r2 = cross_val_score(
+                pipe, self.X_train, self.y_train,
+                cv=tscv, scoring='r2', n_jobs=-1
+            )
+
+            # Group-based CV (only when iso_alpha_3 is NOT used as a feature)
+            if run_group_cv:
+                scores_group_mae = -cross_val_score(
+                    pipe, self.X_train, self.y_train,
+                    groups=self.groups_train, cv=gkf,
+                    scoring='neg_mean_absolute_error', n_jobs=-1
+                )
+                scores_group_r2 = cross_val_score(
+                    pipe, self.X_train, self.y_train,
+                    groups=self.groups_train, cv=gkf,
+                    scoring='r2', n_jobs=-1
+                )
+                results[name] = {
+                    'group_mae_mean': scores_group_mae.mean(),
+                    'group_mae_std':  scores_group_mae.std(),
+                    'time_mae_mean':  scores_time_mae.mean(),
+                    'time_mae_std':   scores_time_mae.std(),
+                    'group_r2_mean':  scores_group_r2.mean(),
+                    'group_r2_std':   scores_group_r2.std(),
+                    'time_r2_mean':   scores_time_r2.mean(),
+                    'time_r2_std':    scores_time_r2.std(),
+                }
+            else:
+                results[name] = {
+                    'time_mae_mean': scores_time_mae.mean(),
+                    'time_mae_std':  scores_time_mae.std(),
+                    'time_r2_mean':  scores_time_r2.mean(),
+                    'time_r2_std':   scores_time_r2.std(),
+                }
+
+        # ---- Pretty print ----
+        if run_group_cv:
+            print("\nCross-Validation Results (GroupKFold + TimeSeriesSplit):")
+            print("-" * 120)
+            print(f"{'Model':<15} {'Group MAE':>12} {'(std)':>8} {'Time MAE':>12} {'(std)':>8} "
+                f"{'Group R2':>12} {'(std)':>8} {'Time R2':>12} {'(std)':>8}")
+            print("-" * 120)
+            for name, res in results.items():
+                print(f"{name:<15} {res['group_mae_mean']:12.4f} {res['group_mae_std']:8.4f} "
+                    f"{res['time_mae_mean']:12.4f}  {res['time_mae_std']:8.4f} "
+                    f"{res['group_r2_mean']:12.4f}  {res['group_r2_std']:8.4f} "
+                    f"{res['time_r2_mean']:12.4f}  {res['time_r2_std']:8.4f}")
+        else:
+            print("\nCross-Validation Results (TimeSeriesSplit only):")
+            print("-" * 70)
+            print(f"{'Model':<15} {'Time MAE':>12} {'(std)':>8} {'Time R2':>12} {'(std)':>8}")
+            print("-" * 70)
+            for name, res in results.items():
+                print(f"{name:<15} {res['time_mae_mean']:12.4f} {res['time_mae_std']:8.4f} "
+                    f"{res['time_r2_mean']:12.4f} {res['time_r2_std']:8.4f}")
+
+        # Helpful note so logs make the rationale explicit
+        if not run_group_cv:
+            print("\n[Note] Skipped GroupKFold because use_group_feature=True (iso_alpha_3 included). "
+                "Group-based CV would leak group identity and overstate generalization to unseen countries.")
         return None
+
 
     def fit(self):
         """
