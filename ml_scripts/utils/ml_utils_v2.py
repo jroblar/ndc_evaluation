@@ -324,6 +324,111 @@ class RegressionAnalysis:
             self.plot_feature_importances(model=importances_model, top_n=15)
         return None
 
+    def _get_pipe_by_name(self, model: str):
+        m = model.strip().lower()
+        if m == 'randomforest': return self.pipe_rf
+        if m == 'xgboost':      return self.pipe_xgb
+        if m == 'elasticnet':   return self.pipe_enet
+        if m == 'median':       return self.pipe_med
+        raise ValueError(f"Unknown model '{model}'. Use one of: RandomForest, XGBoost, ElasticNet, Median.")
+
+    def per_country_metrics(self,
+                            model: str = 'RandomForest',
+                            compute_r2: bool = True,
+                            min_obs: int = 3,
+                            sort_by: str = 'mae') -> pd.DataFrame:
+        """
+        Compute per-country test-set metrics (MAE, optional R2) for the specified model.
+
+        Parameters
+        ----------
+        model : {'RandomForest','XGBoost','ElasticNet','Median'}
+            Which fitted pipeline to use.
+        compute_r2 : bool
+            Whether to compute R^2 per country (requires >= 2 samples).
+        min_obs : int
+            Minimum # of test observations per country to keep in the report.
+        sort_by : {'mae','r2','n'}
+            Column to sort the output by (ascending for 'mae', descending for 'r2'/'n').
+
+        Returns
+        -------
+        pd.DataFrame with columns: ['iso_alpha_3','n','mae','r2'] (r2 optional)
+        """
+        pipe = self._get_pipe_by_name(model)
+        # Predictions on the held-out (test) split
+        y_true = self.y_test
+        y_pred = pipe.predict(self.X_test)
+
+        # Country labels for the test indices
+        countries = self.df.loc[self.X_test.index, self.group_col].values
+
+        rows = []
+        for c in np.unique(countries):
+            idx = (countries == c)
+            n = idx.sum()
+            if n < min_obs:
+                continue
+            y_t = y_true[idx]
+            y_p = y_pred[idx]
+            mae = mean_absolute_error(y_t, y_p)
+            rec = {'iso_alpha_3': c, 'n': n, 'mae': mae}
+            if compute_r2 and n >= 2 and np.var(y_t) > 0:
+                rec['r2'] = r2_score(y_t, y_p)
+            rows.append(rec)
+
+        df_metrics = pd.DataFrame(rows).sort_values(
+            by=sort_by if sort_by in {'mae','r2','n'} else 'mae',
+            ascending=(sort_by == 'mae')
+        ).reset_index(drop=True)
+
+        # Friendly note for small samples
+        small_counts = (self.y_test.groupby(countries).size() < min_obs).sum()
+        if small_counts > 0:
+            print(f"[Note] {small_counts} countries were excluded (fewer than {min_obs} test observations).")
+
+        return df_metrics
+
+    def plot_per_country_metric(self,
+                                model: str = 'RandomForest',
+                                metric: str = 'mae',
+                                top_k: Optional[int] = 25):
+        """
+        Bar plot of per-country test-set metric for the specified model.
+
+        Parameters
+        ----------
+        model : {'RandomForest','XGBoost','ElasticNet','Median'}
+        metric : {'mae','r2'}
+            Which metric to plot. If 'r2', sorts descending (best first).
+        top_k : int or None
+            Show top K countries by metric ordering. If None, show all.
+        """
+        dfm = self.per_country_metrics(model=model, compute_r2=True)
+        if metric not in dfm.columns:
+            raise ValueError(f"Metric '{metric}' not available. Available: {list(dfm.columns)}")
+
+        # Sorting
+        if metric == 'mae':
+            dfp = dfm.sort_values('mae', ascending=True)
+            title = f"{model}: Per-country Test MAE (lower is better)"
+        else:  # r2
+            dfp = dfm.dropna(subset=['r2']).sort_values('r2', ascending=False)
+            title = f"{model}: Per-country Test R² (higher is better)"
+
+        if top_k is not None and len(dfp) > top_k:
+            dfp = dfp.head(top_k)
+
+        plt.figure(figsize=(10, max(4, 0.35*len(dfp))))
+        plt.barh(dfp['iso_alpha_3'], dfp[metric])
+        plt.xlabel(metric.upper())
+        plt.ylabel('iso_alpha_3')
+        plt.title(title)
+        plt.gca().invert_yaxis()
+        plt.tight_layout()
+        plt.show()
+
+
 class EnsembleProjections:
 
     @staticmethod
