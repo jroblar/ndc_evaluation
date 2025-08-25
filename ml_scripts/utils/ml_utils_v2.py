@@ -19,6 +19,7 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 import warnings
 from statsmodels.tools.sm_exceptions import ConvergenceWarning
 from pmdarima import auto_arima
+from typing import Dict, Iterable, Optional, Union
 
 # Suppress warnings
 warnings.filterwarnings(
@@ -142,55 +143,93 @@ class RegressionAnalysis:
 
     def cross_validate(self):
         """
-        Perform GroupKFold and TimeSeriesSplit cross-validation on training data.
+        Perform cross-validation on training data.
+        - If use_group_feature is False: run GroupKFold (by country) + TimeSeriesSplit.
+        - If use_group_feature is True: SKIP GroupKFold to avoid leakage; run only TimeSeriesSplit.
         Prints CV results in a formatted table, including MAE and R2.
         """
         results = {}
-        gkf = GroupKFold(n_splits=5)
+        run_group_cv = not self.use_group_feature  # only do group-based CV when iso_alpha_3 is NOT a feature
+
+        if run_group_cv:
+            gkf = GroupKFold(n_splits=5)
         tscv = TimeSeriesSplit(n_splits=5)
-        for name, pipe in [('RandomForest', self.pipe_rf),
-                           ('XGBoost', self.pipe_xgb),
-                           ('ElasticNet', self.pipe_enet),
-                           ('Median', self.pipe_med)]:
-            scores_group_mae = -cross_val_score(pipe, self.X_train, self.y_train,
-                                                groups=self.groups_train,
-                                                cv=gkf,
-                                                scoring='neg_mean_absolute_error',
-                                                n_jobs=-1)
-            scores_time_mae = -cross_val_score(pipe, self.X_train, self.y_train,
-                                               cv=tscv,
-                                               scoring='neg_mean_absolute_error',
-                                               n_jobs=-1)
-            scores_group_r2 = cross_val_score(pipe, self.X_train, self.y_train,
-                                              groups=self.groups_train,
-                                              cv=gkf,
-                                              scoring='r2',
-                                              n_jobs=-1)
-            scores_time_r2 = cross_val_score(pipe, self.X_train, self.y_train,
-                                             cv=tscv,
-                                             scoring='r2',
-                                             n_jobs=-1)
-            results[name] = {
-                'group_mae_mean': scores_group_mae.mean(),
-                'group_mae_std': scores_group_mae.std(),
-                'time_mae_mean': scores_time_mae.mean(),
-                'time_mae_std': scores_time_mae.std(),
-                'group_r2_mean': scores_group_r2.mean(),
-                'group_r2_std': scores_group_r2.std(),
-                'time_r2_mean': scores_time_r2.mean(),
-                'time_r2_std': scores_time_r2.std()
-            }
-        print("\nCross-Validation Results:")
-        print("-" * 120)
-        print(f"{'Model':<15} {'Group MAE':>12} {'(std)':>8} {'Time MAE':>12} {'(std)':>8} "
-              f"{'Group R2':>12} {'(std)':>8} {'Time R2':>12} {'(std)':>8}")
-        print("-" * 120)
-        for name, res in results.items():
-            print(f"{name:<15} {res['group_mae_mean']:12.4f} {res['group_mae_std']:8.4f} "
-                  f"{res['time_mae_mean']:12.4f} {res['time_mae_std']:8.4f} "
-                  f"{res['group_r2_mean']:12.4f} {res['group_r2_std']:8.4f} "
-                  f"{res['time_r2_mean']:12.4f} {res['time_r2_std']:8.4f}")
+
+        models = [
+            ('RandomForest', self.pipe_rf),
+            ('XGBoost',      self.pipe_xgb),
+            ('ElasticNet',   self.pipe_enet),
+            ('Median',       self.pipe_med),
+        ]
+
+        for name, pipe in models:
+            # Time-based CV (always)
+            scores_time_mae = -cross_val_score(
+                pipe, self.X_train, self.y_train,
+                cv=tscv, scoring='neg_mean_absolute_error', n_jobs=-1
+            )
+            scores_time_r2 = cross_val_score(
+                pipe, self.X_train, self.y_train,
+                cv=tscv, scoring='r2', n_jobs=-1
+            )
+
+            # Group-based CV (only when iso_alpha_3 is NOT used as a feature)
+            if run_group_cv:
+                scores_group_mae = -cross_val_score(
+                    pipe, self.X_train, self.y_train,
+                    groups=self.groups_train, cv=gkf,
+                    scoring='neg_mean_absolute_error', n_jobs=-1
+                )
+                scores_group_r2 = cross_val_score(
+                    pipe, self.X_train, self.y_train,
+                    groups=self.groups_train, cv=gkf,
+                    scoring='r2', n_jobs=-1
+                )
+                results[name] = {
+                    'group_mae_mean': scores_group_mae.mean(),
+                    'group_mae_std':  scores_group_mae.std(),
+                    'time_mae_mean':  scores_time_mae.mean(),
+                    'time_mae_std':   scores_time_mae.std(),
+                    'group_r2_mean':  scores_group_r2.mean(),
+                    'group_r2_std':   scores_group_r2.std(),
+                    'time_r2_mean':   scores_time_r2.mean(),
+                    'time_r2_std':    scores_time_r2.std(),
+                }
+            else:
+                results[name] = {
+                    'time_mae_mean': scores_time_mae.mean(),
+                    'time_mae_std':  scores_time_mae.std(),
+                    'time_r2_mean':  scores_time_r2.mean(),
+                    'time_r2_std':   scores_time_r2.std(),
+                }
+
+        # ---- Pretty print ----
+        if run_group_cv:
+            print("\nCross-Validation Results (GroupKFold + TimeSeriesSplit):")
+            print("-" * 120)
+            print(f"{'Model':<15} {'Group MAE':>12} {'(std)':>8} {'Time MAE':>12} {'(std)':>8} "
+                f"{'Group R2':>12} {'(std)':>8} {'Time R2':>12} {'(std)':>8}")
+            print("-" * 120)
+            for name, res in results.items():
+                print(f"{name:<15} {res['group_mae_mean']:12.4f} {res['group_mae_std']:8.4f} "
+                    f"{res['time_mae_mean']:12.4f}  {res['time_mae_std']:8.4f} "
+                    f"{res['group_r2_mean']:12.4f}  {res['group_r2_std']:8.4f} "
+                    f"{res['time_r2_mean']:12.4f}  {res['time_r2_std']:8.4f}")
+        else:
+            print("\nCross-Validation Results (TimeSeriesSplit only):")
+            print("-" * 70)
+            print(f"{'Model':<15} {'Time MAE':>12} {'(std)':>8} {'Time R2':>12} {'(std)':>8}")
+            print("-" * 70)
+            for name, res in results.items():
+                print(f"{name:<15} {res['time_mae_mean']:12.4f} {res['time_mae_std']:8.4f} "
+                    f"{res['time_r2_mean']:12.4f} {res['time_r2_std']:8.4f}")
+
+        # Helpful note so logs make the rationale explicit
+        if not run_group_cv:
+            print("\n[Note] Skipped GroupKFold because use_group_feature=True (iso_alpha_3 included). "
+                "Group-based CV would leak group identity and overstate generalization to unseen countries.")
         return None
+
 
     def fit(self):
         """
@@ -284,6 +323,111 @@ class RegressionAnalysis:
         if plot_importances:
             self.plot_feature_importances(model=importances_model, top_n=15)
         return None
+
+    def _get_pipe_by_name(self, model: str):
+        m = model.strip().lower()
+        if m == 'randomforest': return self.pipe_rf
+        if m == 'xgboost':      return self.pipe_xgb
+        if m == 'elasticnet':   return self.pipe_enet
+        if m == 'median':       return self.pipe_med
+        raise ValueError(f"Unknown model '{model}'. Use one of: RandomForest, XGBoost, ElasticNet, Median.")
+
+    def per_country_metrics(self,
+                            model: str = 'RandomForest',
+                            compute_r2: bool = True,
+                            min_obs: int = 3,
+                            sort_by: str = 'mae') -> pd.DataFrame:
+        """
+        Compute per-country test-set metrics (MAE, optional R2) for the specified model.
+
+        Parameters
+        ----------
+        model : {'RandomForest','XGBoost','ElasticNet','Median'}
+            Which fitted pipeline to use.
+        compute_r2 : bool
+            Whether to compute R^2 per country (requires >= 2 samples).
+        min_obs : int
+            Minimum # of test observations per country to keep in the report.
+        sort_by : {'mae','r2','n'}
+            Column to sort the output by (ascending for 'mae', descending for 'r2'/'n').
+
+        Returns
+        -------
+        pd.DataFrame with columns: ['iso_alpha_3','n','mae','r2'] (r2 optional)
+        """
+        pipe = self._get_pipe_by_name(model)
+        # Predictions on the held-out (test) split
+        y_true = self.y_test
+        y_pred = pipe.predict(self.X_test)
+
+        # Country labels for the test indices
+        countries = self.df.loc[self.X_test.index, self.group_col].values
+
+        rows = []
+        for c in np.unique(countries):
+            idx = (countries == c)
+            n = idx.sum()
+            if n < min_obs:
+                continue
+            y_t = y_true[idx]
+            y_p = y_pred[idx]
+            mae = mean_absolute_error(y_t, y_p)
+            rec = {'iso_alpha_3': c, 'n': n, 'mae': mae}
+            if compute_r2 and n >= 2 and np.var(y_t) > 0:
+                rec['r2'] = r2_score(y_t, y_p)
+            rows.append(rec)
+
+        df_metrics = pd.DataFrame(rows).sort_values(
+            by=sort_by if sort_by in {'mae','r2','n'} else 'mae',
+            ascending=(sort_by == 'mae')
+        ).reset_index(drop=True)
+
+        # Friendly note for small samples
+        small_counts = (self.y_test.groupby(countries).size() < min_obs).sum()
+        if small_counts > 0:
+            print(f"[Note] {small_counts} countries were excluded (fewer than {min_obs} test observations).")
+
+        return df_metrics
+
+    def plot_per_country_metric(self,
+                                model: str = 'RandomForest',
+                                metric: str = 'mae',
+                                top_k: Optional[int] = 25):
+        """
+        Bar plot of per-country test-set metric for the specified model.
+
+        Parameters
+        ----------
+        model : {'RandomForest','XGBoost','ElasticNet','Median'}
+        metric : {'mae','r2'}
+            Which metric to plot. If 'r2', sorts descending (best first).
+        top_k : int or None
+            Show top K countries by metric ordering. If None, show all.
+        """
+        dfm = self.per_country_metrics(model=model, compute_r2=True)
+        if metric not in dfm.columns:
+            raise ValueError(f"Metric '{metric}' not available. Available: {list(dfm.columns)}")
+
+        # Sorting
+        if metric == 'mae':
+            dfp = dfm.sort_values('mae', ascending=True)
+            title = f"{model}: Per-country Test MAE (lower is better)"
+        else:  # r2
+            dfp = dfm.dropna(subset=['r2']).sort_values('r2', ascending=False)
+            title = f"{model}: Per-country Test R² (higher is better)"
+
+        if top_k is not None and len(dfp) > top_k:
+            dfp = dfp.head(top_k)
+
+        plt.figure(figsize=(10, max(4, 0.35*len(dfp))))
+        plt.barh(dfp['iso_alpha_3'], dfp[metric])
+        plt.xlabel(metric.upper())
+        plt.ylabel('iso_alpha_3')
+        plt.title(title)
+        plt.gca().invert_yaxis()
+        plt.tight_layout()
+        plt.show()
+
 
 class EnsembleProjections:
 
@@ -559,4 +703,141 @@ class EnsembleProjections:
 
         # Clean up and return
         df.drop(columns=["sim_base_emissions"], inplace=True)
+        return df
+    
+    @staticmethod
+    def calibrate_to_initial_conditions(
+        simulated_df: pd.DataFrame,
+        initial_conditions_df: pd.DataFrame,
+        base_year: int = 2022,
+        columns: Optional[Iterable[str]] = None,
+        col_map: Optional[Dict[str, str]] = None,
+        adjustment_method: Union[str, Dict[str, str]] = "multiplicative",
+        update_logs: bool = True,
+        log_prefix: str = "log_",
+        epsilon: float = 1e-12,
+    ) -> pd.DataFrame:
+        """
+        Calibrate selected feature columns in `simulated_df` so that, for each future (future_id),
+        the base-year values match those in `initial_conditions_df` (keyed by iso_alpha_3, year=base_year).
+        Then propagate the SAME additive or multiplicative deviation across all years.
+
+        Parameters
+        ----------
+        simulated_df : pd.DataFrame
+            Must include ['iso_alpha_3','future_id','year'] and the feature columns to adjust.
+        initial_conditions_df : pd.DataFrame
+            Must include ['iso_alpha_3','year'] and base-year values for selected features.
+        base_year : int
+            Anchor year (default 2022).
+        columns : iterable[str] | None
+            Which *initial* columns to align. Defaults to the intersection of feature columns
+            (excluding keys) present in both dataframes.
+        col_map : dict[str,str] | None
+            Optional mapping {init_col -> sim_col} if column names differ between the two frames.
+            By default it assumes the same names in both.
+        adjustment_method : {"additive","multiplicative"} or dict[str, {"additive","multiplicative"}]
+            Either a single method for all columns or a per-column map.
+            Tip: use "additive" for growth rates, "multiplicative" for level variables.
+        update_logs : bool
+            If True, recompute matching log columns (e.g., 'log_pop_total' from 'pop_total').
+            Values <= 0 will produce NaN in the log.
+        log_prefix : str
+            Prefix used for log columns in `simulated_df`.
+        epsilon : float
+            Small constant to avoid division by zero in multiplicative adjustment.
+
+        Returns
+        -------
+        pd.DataFrame
+            A copy of `simulated_df` with calibrated columns (and optional log columns) updated.
+        """
+        required_sim_cols = {"iso_alpha_3", "future_id", "year"}
+        if not required_sim_cols.issubset(simulated_df.columns):
+            missing = required_sim_cols - set(simulated_df.columns)
+            raise ValueError(f"`simulated_df` is missing required columns: {missing}")
+
+        required_init_cols = {"iso_alpha_3", "year"}
+        if not required_init_cols.issubset(initial_conditions_df.columns):
+            missing = required_init_cols - set(initial_conditions_df.columns)
+            raise ValueError(f"`initial_conditions_df` is missing required columns: {missing}")
+
+        # Filter initial conditions to the base year and drop duplicates on iso
+        init_base = (
+            initial_conditions_df[initial_conditions_df["year"] == base_year]
+            .drop_duplicates(subset=["iso_alpha_3"])
+            .set_index("iso_alpha_3")
+        )
+
+        # Decide which columns to calibrate
+        # (exclude key columns from consideration)
+        if columns is None:
+            exclude = {"iso_alpha_3", "year"}
+            candidate_cols = [c for c in init_base.columns if c not in exclude]
+            columns = [c for c in candidate_cols if c in simulated_df.columns]
+
+        if len(columns) == 0:
+            # Nothing to do
+            return simulated_df.copy()
+
+        # Optional mapping: init_col -> sim_col (default: identity)
+        col_map = col_map or {c: c for c in columns}
+
+        # Extract base-year simulated values per future_id
+        base_sim = (
+            simulated_df.loc[simulated_df["year"] == base_year, ["future_id", "iso_alpha_3"] + list(col_map.values())]
+            .copy()
+        )
+        # Rename sim base columns: sim_base_<sim_col>
+        base_rename = {sim_col: f"sim_base__{sim_col}" for sim_col in col_map.values()}
+        base_sim.rename(columns=base_rename, inplace=True)
+
+        # Merge base sim baselines into all rows by future_id
+        df = simulated_df.merge(base_sim[["future_id"] + list(base_rename.values())], on="future_id", how="left")
+
+        def method_for(col: str) -> str:
+            if isinstance(adjustment_method, dict):
+                return adjustment_method.get(col, "multiplicative")
+            return adjustment_method
+
+        # Calibrate per column
+        for init_col, sim_col in col_map.items():
+            if init_col not in init_base.columns:
+                # Skip silently if init col not present in base init df
+                continue
+            if sim_col not in df.columns:
+                continue
+
+            # Lookup initial base value by iso for the whole df (align via index)
+            init_vals = df["iso_alpha_3"].map(init_base[init_col])
+
+            sim_base_col = f"sim_base__{sim_col}"
+            if sim_base_col not in df.columns:
+                # No baseline for this future_id -> cannot calibrate; skip
+                continue
+
+            m = method_for(init_col).lower()
+            if m not in {"additive", "multiplicative"}:
+                raise ValueError(f"Invalid method '{m}' for column '{init_col}'. Use 'additive' or 'multiplicative'.")
+
+            if m == "additive":
+                # new = init + (cur - base)
+                df[sim_col] = init_vals + (df[sim_col] - df[sim_base_col])
+            else:
+                # new = init * (cur / base)
+                denom = np.where(np.isfinite(df[sim_base_col]) & (np.abs(df[sim_base_col]) > 0), df[sim_base_col], np.nan)
+                ratio = df[sim_col] / denom
+                df[sim_col] = init_vals * ratio
+
+            # Optional: update corresponding log column if present
+            if update_logs:
+                log_col = f"{log_prefix}{sim_col}" if not sim_col.startswith(log_prefix) else sim_col
+                # Only recompute if a separate log column exists
+                if log_col in df.columns and log_col != sim_col:
+                    # Guard: log undefined for <= 0 -> set NaN
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        df[log_col] = np.where(df[sim_col] > 0, np.log(df[sim_col]), np.nan)
+
+        # Drop baseline helper columns
+        df.drop(columns=[c for c in df.columns if c.startswith("sim_base__")], inplace=True)
         return df
