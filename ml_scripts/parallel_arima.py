@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
-
+import time
 from scipy.stats import qmc
 from pmdarima import auto_arima
 from statsmodels.tsa.statespace.sarimax import SARIMAX
@@ -13,6 +13,9 @@ import pyarrow.parquet as pq
 from functools import partial
 import warnings
 from statsmodels.tools.sm_exceptions import ConvergenceWarning
+
+# save start time
+start_time = time.time()
 
 def simulate_country(
     df, iso, feature_cols, years, horizon,
@@ -144,13 +147,16 @@ numeric_cols_to_drop = ["year", "log_total_emissions"]
 numeric_cols = [col for col in numeric_cols if col not in numeric_cols_to_drop]
 numeric_cols
 
+
+n_scenarios = 100  # Number of scenarios to generate
+
 generate_ensemble_arima_parallel(
     df=training_df_log_transformed,
     feature_cols=numeric_cols,
     start_year=2022,
     end_year=2030,
-    n_scenarios=1000,                          
-    out_path="ensemble_arima_1000.parquet",
+    n_scenarios=n_scenarios,                          
+    out_path=f"ensemble_arima_{n_scenarios}.parquet",
     arima_order=(1, 1, 1),                     
     auto_tune_arima= True,                      
     max_p=3, max_d=1, max_q=3,                 
@@ -160,6 +166,10 @@ generate_ensemble_arima_parallel(
 
 ### Checking the output
 
-ensemble_df = pd.read_parquet(os.path.join(ENSEMBLE_DIR_PATH, "ensemble_arima_1000.parquet"))
+ensemble_df = pd.read_parquet(os.path.join(ENSEMBLE_DIR_PATH, f"ensemble_arima_{n_scenarios}.parquet"))
 print("Shape:", ensemble_df.shape)
 ensemble_df.head(20)
+
+# Save the execution time
+execution_time = time.time() - start_time
+print(f"Execution time: {execution_time:.2f} seconds")
