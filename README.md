@@ -36,21 +36,15 @@ Notebooks used to process raw datasets from the World Bank and IEA:
 
 ### `index/`
 
-Files for constructing the Climate Policy Stringency Index (CPSI):
+Files for constructing the policy index:
 
-* **`cpsi_index_final.ipynb`** – Builds and explores multiple CPSI index variants. Review for methodological notes and scoring approaches. Produces `IEA_scored_cpsi.csv`.
+* **`add_index_to_policies.ipynb`** – Builds and explores multiple climate policy index variants. Review for methodological notes and scoring approaches. Produces `IEA_scored_index.csv`.
 * **`documentation/index_report.pdf`** – Documentation on how the index was built.
 
 ### `ml_scripts/`
 
 Notebooks for merging socio-economic and emissions data (We removed the policy index out of the predictors), performing exploratory data analysis, and training machine learning models to estimate emissions trajectories and the likelihood of target achievement.
 
-* **`model_v7.1.ipynb`** – Trains several models to predict emissions using World Bank indicators. Saves the best pipelines as `.pkl` files under [`ml_scripts/output/models`](ml_scripts/output/models).
-* **`run_ensemble.ipynb`** – Loads training data and runs an ensemble of projected predictors using an ARIMA model. Saves the ensemble CSV files under [`ml_scripts/output/ensemble`](ml_scripts/output/ensemble). Since these files can be too large, we are not tracking them in GitHub. In addition, this notebook allows you to run ARIMA with an auto-tuning feature. This may take longer to run, but it might be worth exploring the results.
-* **`ensemble_analysis.ipynb`** – Once we have a trained model to predict emissions with historical WB indicator data, and CSV files with ensemble experiments representing multiple future trajectories for our predictors, we can finally predict emissions for each of those futures with our model and obtain the distribution of emissions all the way to 2030.
-
-## TODO:
-
-* Run the ARIMA projections with the auto-tuning feature and see how much it improves compared to the baseline.
-* Run a larger experiment, around 100 to 1,000 futures.
-* Finalize the analysis in `ensemble_analysis.ipynb` or create a new notebook to obtain the distribution of predicted emissions in 2030 for each country. Then, calculate the probability of a country reaching its mitigation goal. We still need to collect the targets for each country.
+* **`model_v7.3.ipynb`** – Trains multiple models to predict emissions using World Bank indicators and a Climate Policy Index. Saves the best-performing pipelines as `.pkl` files in [`ml_scripts/output/models`](ml_scripts/output/models).
+* **`parallel_arima.py`** – Loads training data and runs an ensemble of projected predictors using an ARIMA model. Saves the resulting ensemble CSV files in [`ml_scripts/output/ensemble`](ml_scripts/output/ensemble).
+* **`postprocess_arima_projections_v3.ipynb`** – Uses the trained model and ARIMA ensemble results to forecast future emissions trends for all countries based on the ARIMA-projected features. This notebook also performs outlier removal and HP filtering. The output file is saved in [`ml_scripts/output/2030_emissions`](ml_scripts/output/2030_emissions).
