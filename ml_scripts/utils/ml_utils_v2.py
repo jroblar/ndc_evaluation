@@ -20,6 +20,8 @@ import warnings
 from statsmodels.tools.sm_exceptions import ConvergenceWarning
 from pmdarima import auto_arima
 from typing import Dict, Iterable, Optional, Union
+from sklearn.impute import SimpleImputer
+
 
 # Suppress warnings
 warnings.filterwarnings(
@@ -30,403 +32,563 @@ warnings.filterwarnings(
 )
 
 class RegressionAnalysis:
-    def __init__(self,
-                 df: pd.DataFrame,
-                 target_col: str,
-                 group_col: str,
-                 year_col: str,
-                 feature_cols: list = None,
-                 holdout_years: int = 5,
-                 xgb_params: dict = None,
-                 rf_params: dict = None,
-                 scaler_type: str = 'standard',
-                 use_group_feature: bool = False):
-        """
-        Regression analysis class, now with XGBoost, optional group_col as feature,
-        one-hot encoding for all categoricals, and year_col always numeric.
-        """
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        target_col: str,
+        group_col: str,
+        year_col: str,
+        feature_cols: list,
+        holdout_years: int = 5,
+        scaler_type: str = "standard",
+        xgb_params: dict = None,
+        rf_params: dict = None,
+    ):
         self.df = df.copy()
         self.target_col = target_col
         self.group_col = group_col
         self.year_col = year_col
-        self.holdout_years = holdout_years
+        self.feature_cols = feature_cols.copy()
+
         self.scaler_type = scaler_type.lower()
-        self.use_group_feature = use_group_feature
+        self.holdout_years = holdout_years
 
-        # Random Forest parameters
-        self.rf_params = rf_params or dict(n_estimators=200, max_depth=None, random_state=42, n_jobs=-1)
+        self.xgb_params = xgb_params or dict(
+            n_estimators=300,
+            max_depth=6,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+            n_jobs=-1,
+            verbosity=0,
+        )
 
-        # XGBoost parameters
-        self.xgb_params = xgb_params or dict(n_estimators=200, max_depth=6, learning_rate=0.1, random_state=42, n_jobs=-1, verbosity=0)
-    
-        # Always treat year_col as numeric feature
-        non_feats = {self.group_col, self.year_col, self.target_col}
-        if feature_cols is None:
-            base_feats = [c for c in self.df.columns if c not in non_feats]
-        else:
-            base_feats = feature_cols.copy()
-        # Ensure year_col included as numeric feature
-        if self.year_col not in base_feats:
-            base_feats.append(self.year_col)
-        # Optionally include group_col as a feature
-        if self.use_group_feature and self.group_col not in base_feats:
-            base_feats.append(self.group_col)
-        self.feature_cols = base_feats
+        self.rf_params = rf_params or dict(
+            n_estimators=300,
+            max_depth=None,
+            random_state=42,
+            n_jobs=-1,
+        )
 
-        # Determine which features are categorical (object or category dtype, or forced by OneHotEncoder)
-        self.categorical_features = [
-            col for col in self.feature_cols
-            if self.df[col].dtype == 'object' or self.df[col].dtype.name == 'category'
-            or (self.use_group_feature and col == self.group_col)
-        ]
-        # year_col is always numeric (ensure not in categoricals)
-        if self.year_col in self.categorical_features:
-            self.categorical_features.remove(self.year_col)
-        self.numeric_features = [
-            col for col in self.feature_cols if col not in self.categorical_features
-        ]
+        # --- Split train / test by time ---
+        cutoff = self.df[self.year_col].max() - self.holdout_years
+        train_mask = self.df[self.year_col] <= cutoff
 
-        # Split data
-        years = self.df[self.year_col]
-        cutoff = years.max() - self.holdout_years
-        train_mask = years <= cutoff
-        self.X_train = self.df.loc[train_mask, self.feature_cols]
-        self.X_test  = self.df.loc[~train_mask, self.feature_cols]
+        self.X_train = self.df.loc[train_mask]
+        self.X_test  = self.df.loc[~train_mask]
         self.y_train = self.df.loc[train_mask, self.target_col]
         self.y_test  = self.df.loc[~train_mask, self.target_col]
         self.groups_train = self.df.loc[train_mask, self.group_col]
 
-        # Build transformers and pipelines
-        self._build_transformers()
+        # --- Build pipelines ---
         self._build_pipelines()
 
+    # -------------------------
+    # Utilities
+    # -------------------------
     def _get_scaler(self):
-        if self.scaler_type == 'standard':
+        if self.scaler_type == "standard":
             return StandardScaler()
-        elif self.scaler_type == 'minmax':
-            return MinMaxScaler()
-        elif self.scaler_type == 'robust':
+        if self.scaler_type == "robust":
             return RobustScaler()
-        else:
-            raise ValueError(f"Unknown scaler_type: {self.scaler_type}")
+        if self.scaler_type == "minmax":
+            return MinMaxScaler()
+        raise ValueError(f"Unknown scaler_type={self.scaler_type}")
 
-    def _build_transformers(self):
-        # OneHot for categoricals, scale numeric
-        self.preprocessor = ColumnTransformer(
+    def _make_preprocessor(self, include_group: bool):
+        feats = self.feature_cols + [self.year_col]
+        if include_group:
+            feats = feats + [self.group_col]
+
+        categorical = [c for c in feats if self.df[c].dtype == "object"]
+        numeric = [c for c in feats if c not in categorical]
+
+        return ColumnTransformer(
             transformers=[
-                ('num', self._get_scaler(), self.numeric_features),
-                ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), self.categorical_features)
+                ("num", Pipeline([
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("scaler", self._get_scaler()),
+                ]), numeric),
+
+                ("cat", Pipeline([
+                    ("imputer", SimpleImputer(strategy="most_frequent")),
+                    ("onehot", OneHotEncoder(drop="first", handle_unknown="ignore")),
+                ]), categorical),
             ]
         )
 
+    # -------------------------
+    # Pipelines
+    # -------------------------
     def _build_pipelines(self):
-        # ElasticNet
-        self.pipe_enet = Pipeline([
-            ('pre', self.preprocessor),
-            ('enet', ElasticNetCV(l1_ratio=[.2, .5, .8], cv=5, random_state=42, n_jobs=-1, max_iter=10000))
-        ])
-        # Random Forest
-        self.pipe_rf = Pipeline([
-            ('pre', self.preprocessor),
-            ('rf', RandomForestRegressor(**self.rf_params))
-        ])
-    
+        # ElasticNet → ISO fixed effects
+        pre_enet = self._make_preprocessor(include_group=True)
+        self.pipe_enet = Pipeline(
+            [
+                ("pre", pre_enet),
+                ("enet", ElasticNetCV(
+                    l1_ratio=[0.2, 0.5, 0.8],
+                    cv=5,
+                    n_jobs=-1,
+                    max_iter=10000,
+                    random_state=42,
+                )),
+            ]
+        )
 
-        # XGBoost
-        self.pipe_xgb = Pipeline([
-            ('pre', self.preprocessor),
-            ('xgb', XGBRegressor(**self.xgb_params))
-        ])
+        # Random Forest → no ISO
+        pre_rf = self._make_preprocessor(include_group=False)
+        self.pipe_rf = Pipeline(
+            [
+                ("pre", pre_rf),
+                ("rf", RandomForestRegressor(**self.rf_params)),
+            ]
+        )
 
-        # Median baseline
-        self.pipe_med = Pipeline([('median', DummyRegressor(strategy='median'))])
+        # XGBoost → no ISO
+        pre_xgb = self._make_preprocessor(include_group=False)
+        self.pipe_xgb = Pipeline(
+            [
+                ("pre", pre_xgb),
+                ("xgb", XGBRegressor(**self.xgb_params)),
+            ]
+        )
 
+        self.pipe_med = Pipeline(
+            [("median", DummyRegressor(strategy="median"))]
+        )
+
+    # -------------------------
+    # Cross-validation
+    # -------------------------
     def cross_validate(self):
-        """
-        Perform cross-validation on training data.
-        - If use_group_feature is False: run GroupKFold (by country) + TimeSeriesSplit.
-        - If use_group_feature is True: SKIP GroupKFold to avoid leakage; run only TimeSeriesSplit.
-        Prints CV results in a formatted table, including MAE and R2.
-        """
-        results = {}
-        run_group_cv = not self.use_group_feature  # only do group-based CV when iso_alpha_3 is NOT a feature
-
-        if run_group_cv:
-            gkf = GroupKFold(n_splits=5)
         tscv = TimeSeriesSplit(n_splits=5)
+        gkf = GroupKFold(n_splits=5)
 
         models = [
-            ('RandomForest', self.pipe_rf),
-            ('XGBoost',      self.pipe_xgb),
-            ('ElasticNet',   self.pipe_enet),
-            ('Median',       self.pipe_med),
+            ("ElasticNet", self.pipe_enet, False),  # ISO included → no GroupKFold
+            ("RandomForest", self.pipe_rf, True),
+            ("XGBoost", self.pipe_xgb, True),
+            ("Median", self.pipe_med, True),
         ]
 
-        for name, pipe in models:
-            # Time-based CV (always)
-            scores_time_mae = -cross_val_score(
-                pipe, self.X_train, self.y_train,
-                cv=tscv, scoring='neg_mean_absolute_error', n_jobs=-1
-            )
-            scores_time_r2 = cross_val_score(
-                pipe, self.X_train, self.y_train,
-                cv=tscv, scoring='r2', n_jobs=-1
-            )
+        print("\nCross-validation results:")
+        print("-" * 90)
+        print(f"{'Model':<15} {'Time MAE':>12} {'Group MAE':>12}")
 
-            # Group-based CV (only when iso_alpha_3 is NOT used as a feature)
-            if run_group_cv:
-                scores_group_mae = -cross_val_score(
-                    pipe, self.X_train, self.y_train,
-                    groups=self.groups_train, cv=gkf,
-                    scoring='neg_mean_absolute_error', n_jobs=-1
-                )
-                scores_group_r2 = cross_val_score(
-                    pipe, self.X_train, self.y_train,
-                    groups=self.groups_train, cv=gkf,
-                    scoring='r2', n_jobs=-1
-                )
-                results[name] = {
-                    'group_mae_mean': scores_group_mae.mean(),
-                    'group_mae_std':  scores_group_mae.std(),
-                    'time_mae_mean':  scores_time_mae.mean(),
-                    'time_mae_std':   scores_time_mae.std(),
-                    'group_r2_mean':  scores_group_r2.mean(),
-                    'group_r2_std':   scores_group_r2.std(),
-                    'time_r2_mean':   scores_time_r2.mean(),
-                    'time_r2_std':    scores_time_r2.std(),
-                }
+        for name, pipe, allow_group_cv in models:
+            time_mae = -cross_val_score(
+                pipe,
+                self.X_train,
+                self.y_train,
+                cv=tscv,
+                scoring="neg_mean_absolute_error",
+                n_jobs=-1,
+            ).mean()
+
+            if allow_group_cv:
+                group_mae = -cross_val_score(
+                    pipe,
+                    self.X_train,
+                    self.y_train,
+                    groups=self.groups_train,
+                    cv=gkf,
+                    scoring="neg_mean_absolute_error",
+                    n_jobs=-1,
+                ).mean()
             else:
-                results[name] = {
-                    'time_mae_mean': scores_time_mae.mean(),
-                    'time_mae_std':  scores_time_mae.std(),
-                    'time_r2_mean':  scores_time_r2.mean(),
-                    'time_r2_std':   scores_time_r2.std(),
-                }
+                group_mae = np.nan
 
-        # ---- Pretty print ----
-        if run_group_cv:
-            print("\nCross-Validation Results (GroupKFold + TimeSeriesSplit):")
-            print("-" * 120)
-            print(f"{'Model':<15} {'Group MAE':>12} {'(std)':>8} {'Time MAE':>12} {'(std)':>8} "
-                f"{'Group R2':>12} {'(std)':>8} {'Time R2':>12} {'(std)':>8}")
-            print("-" * 120)
-            for name, res in results.items():
-                print(f"{name:<15} {res['group_mae_mean']:12.4f} {res['group_mae_std']:8.4f} "
-                    f"{res['time_mae_mean']:12.4f}  {res['time_mae_std']:8.4f} "
-                    f"{res['group_r2_mean']:12.4f}  {res['group_r2_std']:8.4f} "
-                    f"{res['time_r2_mean']:12.4f}  {res['time_r2_std']:8.4f}")
-        else:
-            print("\nCross-Validation Results (TimeSeriesSplit only):")
-            print("-" * 70)
-            print(f"{'Model':<15} {'Time MAE':>12} {'(std)':>8} {'Time R2':>12} {'(std)':>8}")
-            print("-" * 70)
-            for name, res in results.items():
-                print(f"{name:<15} {res['time_mae_mean']:12.4f} {res['time_mae_std']:8.4f} "
-                    f"{res['time_r2_mean']:12.4f} {res['time_r2_std']:8.4f}")
+            print(f"{name:<15} {time_mae:12.4f} {group_mae:12.4f}")
 
-        # Helpful note so logs make the rationale explicit
-        if not run_group_cv:
-            print("\n[Note] Skipped GroupKFold because use_group_feature=True (iso_alpha_3 included). "
-                "Group-based CV would leak group identity and overstate generalization to unseen countries.")
-        return None
-
-
+    # -------------------------
+    # Fit / evaluate
+    # -------------------------
     def fit(self):
-        """
-        Fit all models on the training data.
-        """
+        self.pipe_enet.fit(self.X_train, self.y_train)
         self.pipe_rf.fit(self.X_train, self.y_train)
         self.pipe_xgb.fit(self.X_train, self.y_train)
-        self.pipe_enet.fit(self.X_train, self.y_train)
         self.pipe_med.fit(self.X_train, self.y_train)
         return self
 
+    
+    def _mae_level_space(self, y_true_log, y_pred_log):
+        """
+        MAE in original emissions units (level space).
+        """
+        y_true_level = np.exp(y_true_log)
+        y_pred_level = np.exp(y_pred_log)
+        return np.mean(np.abs(y_true_level - y_pred_level))
+
+
+    def _rmse_log_space(self, y_true_log, y_pred_log):
+        """
+        RMSE in log space.
+        """
+        return np.sqrt(mean_squared_error(y_true_log, y_pred_log))
+
+    
+    
     def evaluate(self):
         """
         Evaluate train vs test to detect overfitting.
-        Prints evaluation metrics in a formatted table.
+        Reports:
+        - MAE (log space)
+        - RMSE (log space)
+        - MAE (level space)
         """
         evals = {}
-        for name, pipe in [('RandomForest', self.pipe_rf),
-                           ('XGBoost', self.pipe_xgb),
-                           ('ElasticNet', self.pipe_enet),
-                           ('Median', self.pipe_med)]:
+
+        for name, pipe in [
+            ('ElasticNet',   self.pipe_enet),
+            ('RandomForest', self.pipe_rf),
+            ('XGBoost',      self.pipe_xgb),
+            ('Median',       self.pipe_med),
+        ]:
+            # Predictions
             y_train_pred = pipe.predict(self.X_train)
             y_test_pred  = pipe.predict(self.X_test)
-            evals[name] = {
-                'train_mae': mean_absolute_error(self.y_train, y_train_pred),
-                'test_mae':  mean_absolute_error(self.y_test,  y_test_pred),
-                'train_r2':  r2_score(self.y_train, y_train_pred),
-                'test_r2':   r2_score(self.y_test,  y_test_pred)
-            }
-        print("\nEvaluation Results:")
-        print("-" * 80)
-        print(f"{'Model':<15} {'Train MAE':>10} {'Test MAE':>10} {'Train R2':>10} {'Test R2':>10}")
-        print("-" * 80)
-        for name, metrics in evals.items():
-            print(f"{name:<15} {metrics['train_mae']:10.4f} {metrics['test_mae']:10.4f} {metrics['train_r2']:10.4f} {metrics['test_r2']:10.4f}")
-        return None
 
-    def plot_feature_importances(self, top_n: int = None, model: str = 'RandomForest'):
+            evals[name] = {
+                # ---- LOG SPACE ----
+                'train_mae_log': mean_absolute_error(self.y_train, y_train_pred),
+                'test_mae_log':  mean_absolute_error(self.y_test,  y_test_pred),
+                'train_rmse_log': self._rmse_log_space(self.y_train, y_train_pred),
+                'test_rmse_log':  self._rmse_log_space(self.y_test,  y_test_pred),
+
+                # ---- LEVEL SPACE ----
+                'train_mae_level': self._mae_level_space(self.y_train, y_train_pred),
+                'test_mae_level':  self._mae_level_space(self.y_test,  y_test_pred),
+            }
+
+        # ---- Pretty print ----
+        print("\nHoldout evaluation:")
+        print("-" * 120)
+        print(
+            f"{'Model':<15}"
+            f"{'Train MAE (log)':>15}"
+            f"{'Test MAE (log)':>15}"
+            f"{'Train RMSE (log)':>18}"
+            f"{'Test RMSE (log)':>18}"
+            f"{'Train MAE (level)':>20}"
+            f"{'Test MAE (level)':>20}"
+        )
+        print("-" * 120)
+
+        for name, m in evals.items():
+            print(
+                f"{name:<15}"
+                f"{m['train_mae_log']:15.4f}"
+                f"{m['test_mae_log']:15.4f}"
+                f"{m['train_rmse_log']:18.4f}"
+                f"{m['test_rmse_log']:18.4f}"
+                f"{m['train_mae_level']:20.2f}"
+                f"{m['test_mae_level']:20.2f}"
+            )
+
+        return evals
+
+    
+    def plot_feature_importances(self, model: str = "XGBoost", top_n: int = 15):
         """
-        Plot feature importances from the Random Forest or XGBoost model.
-        Set model='XGBoost' to plot XGBoost importances.
+        Plot feature importances from RandomForest or XGBoost.
         """
-        pipe = None
-        if model.lower() == 'xgboost':
+        model = model.lower()
+
+        if model == "xgboost":
             pipe = self.pipe_xgb
-            step = 'xgb'
-            title = 'XGBoost Feature Importances'
-        else:
+            est_name = "xgb"
+            title = "XGBoost Feature Importances"
+        elif model == "randomforest":
             pipe = self.pipe_rf
-            step = 'rf'
-            title = 'Random Forest Feature Importances'
-        # Extract fitted estimator from pipeline
-        if isinstance(pipe, GridSearchCV):
-            estimator = pipe.best_estimator_.named_steps[step]
+            est_name = "rf"
+            title = "Random Forest Feature Importances"
         else:
-            estimator = pipe.named_steps[step]
+            raise ValueError("model must be 'XGBoost' or 'RandomForest'")
+
+        # ---- Extract fitted components ----
+        preprocessor = pipe.named_steps["pre"]
+        estimator = pipe.named_steps[est_name]
+
+        if not hasattr(estimator, "feature_importances_"):
+            raise RuntimeError(f"{model} does not expose feature_importances_")
+
         importances = estimator.feature_importances_
-        # After ColumnTransformer and OneHot, feature names change:
-        feature_names = []
-        if hasattr(self.preprocessor, 'transformers_'):
-            # Get feature names after transform
-            num_feats = self.numeric_features
-            cat_encoder = self.preprocessor.named_transformers_['cat']
-            cat_feats = list(cat_encoder.get_feature_names_out(self.categorical_features))
-            feature_names = num_feats + cat_feats
-        else:
-            # fallback
-            feature_names = self.numeric_features + self.categorical_features
-        indices = np.argsort(importances)[::-1]
-        labels = [feature_names[i] for i in indices]
-        if top_n:
-            labels = labels[:top_n]
-            importances = importances[indices][:top_n]
-            indices = indices[:top_n]
-        plt.figure(figsize=(8,6))
-        plt.barh(range(len(importances)), importances[::-1])
-        plt.yticks(range(len(importances)), labels[::-1])
-        plt.xlabel('Importance')
+
+        # ---- Get correct feature names AFTER preprocessing ----
+        try:
+            feature_names = preprocessor.get_feature_names_out()
+        except Exception as e:
+            raise RuntimeError(
+                "Could not extract feature names from preprocessor. "
+                "Make sure the pipeline has been fitted."
+            ) from e
+
+        # ---- Sanity check ----
+        if len(feature_names) != len(importances):
+            raise RuntimeError(
+                f"Mismatch: {len(feature_names)} features vs "
+                f"{len(importances)} importances"
+            )
+
+        # ---- Select top features ----
+        idx = np.argsort(importances)[::-1]
+        if top_n is not None:
+            idx = idx[:top_n]
+
+        top_features = feature_names[idx]
+        top_importances = importances[idx]
+
+        # ---- Plot ----
+        plt.figure(figsize=(8, max(4, 0.4 * len(idx))))
+        plt.barh(range(len(idx)), top_importances[::-1])
+        plt.yticks(range(len(idx)), top_features[::-1])
+        plt.xlabel("Importance")
         plt.title(title)
         plt.tight_layout()
         plt.show()
-
-    def run_all(self, plot_importances: bool = True, importances_model: str = 'RandomForest') -> dict:
+    
+    def top_n_features(
+        self,
+        model: str = "XGBoost",
+        n: int = 10,
+        return_importance: bool = False
+    ):
         """
-        Utility to run CV, fit, evaluate, and optionally plot.
-        Returns a summary dict.
-        """
-        self.cross_validate()
-        self.fit()
-        self.evaluate()
-        if plot_importances:
-            self.plot_feature_importances(model=importances_model, top_n=15)
-        return None
-
-    def _get_pipe_by_name(self, model: str):
-        m = model.strip().lower()
-        if m == 'randomforest': return self.pipe_rf
-        if m == 'xgboost':      return self.pipe_xgb
-        if m == 'elasticnet':   return self.pipe_enet
-        if m == 'median':       return self.pipe_med
-        raise ValueError(f"Unknown model '{model}'. Use one of: RandomForest, XGBoost, ElasticNet, Median.")
-
-    def per_country_metrics(self,
-                            model: str = 'RandomForest',
-                            compute_r2: bool = True,
-                            min_obs: int = 3,
-                            sort_by: str = 'mae') -> pd.DataFrame:
-        """
-        Compute per-country test-set metrics (MAE, optional R2) for the specified model.
+        Return the names of the top-n most important features
+        according to the fitted model.
 
         Parameters
         ----------
-        model : {'RandomForest','XGBoost','ElasticNet','Median'}
-            Which fitted pipeline to use.
-        compute_r2 : bool
-            Whether to compute R^2 per country (requires >= 2 samples).
-        min_obs : int
-            Minimum # of test observations per country to keep in the report.
-        sort_by : {'mae','r2','n'}
-            Column to sort the output by (ascending for 'mae', descending for 'r2'/'n').
+        model : {'XGBoost','RandomForest'}
+            Which model to use.
+        n : int
+            Number of top features to return.
+        return_importance : bool
+            If True, return (feature, importance) tuples.
 
         Returns
         -------
-        pd.DataFrame with columns: ['iso_alpha_3','n','mae','r2'] (r2 optional)
+        list
+            List of feature names (or tuples if return_importance=True).
         """
-        pipe = self._get_pipe_by_name(model)
-        # Predictions on the held-out (test) split
-        y_true = self.y_test
-        y_pred = pipe.predict(self.X_test)
 
-        # Country labels for the test indices
+        model = model.lower()
+
+        if model == "xgboost":
+            pipe = self.pipe_xgb
+            est_name = "xgb"
+        elif model == "randomforest":
+            pipe = self.pipe_rf
+            est_name = "rf"
+        else:
+            raise ValueError("model must be 'XGBoost' or 'RandomForest'")
+
+        # ---- Extract fitted objects ----
+        preprocessor = pipe.named_steps["pre"]
+        estimator = pipe.named_steps[est_name]
+
+        if not hasattr(estimator, "feature_importances_"):
+            raise RuntimeError(f"{model} does not expose feature_importances_")
+
+        importances = estimator.feature_importances_
+
+        # ---- Feature names after preprocessing ----
+        feature_names = preprocessor.get_feature_names_out()
+
+        if len(importances) != len(feature_names):
+            raise RuntimeError(
+                "Mismatch between feature names and importance vector"
+            )
+
+        # ---- Rank ----
+        order = np.argsort(importances)[::-1][:n]
+
+        if return_importance:
+            return [
+                (feature_names[i], importances[i])
+                for i in order
+            ]
+        else:
+            return [feature_names[i] for i in order]
+
+
+    def _get_pipe_by_name(self, model: str):
+        model = model.strip().lower()
+        if model == "randomforest":
+            return self.pipe_rf
+        elif model == "xgboost":
+            return self.pipe_xgb
+        elif model == "elasticnet":
+            return self.pipe_enet
+        elif model == "median":
+            return self.pipe_med
+        else:
+            raise ValueError(
+                "model must be one of: "
+                "['RandomForest', 'XGBoost', 'ElasticNet', 'Median']"
+            )
+
+        
+    def per_country_errors(
+        self,
+        model: str = "XGBoost",
+        min_obs: int = 5
+    ) -> pd.DataFrame:
+        """
+        Compute per-country errors on the TEST set.
+        Reports:
+        - MAE (log space)
+        - RMSE (log space)
+        - MAE (level space)
+        - # observations
+        """
+
+        pipe = self._get_pipe_by_name(model)
+
+        # Predictions on test set
+        y_true_log = self.y_test.values
+        y_pred_log = pipe.predict(self.X_test)
+
+        y_true_lvl = np.exp(y_true_log)
+        y_pred_lvl = np.exp(y_pred_log)
+
         countries = self.df.loc[self.X_test.index, self.group_col].values
 
         rows = []
         for c in np.unique(countries):
-            idx = (countries == c)
+            idx = countries == c
             n = idx.sum()
             if n < min_obs:
                 continue
-            y_t = y_true[idx]
-            y_p = y_pred[idx]
-            mae = mean_absolute_error(y_t, y_p)
-            rec = {'iso_alpha_3': c, 'n': n, 'mae': mae}
-            if compute_r2 and n >= 2 and np.var(y_t) > 0:
-                rec['r2'] = r2_score(y_t, y_p)
-            rows.append(rec)
 
-        df_metrics = pd.DataFrame(rows).sort_values(
-            by=sort_by if sort_by in {'mae','r2','n'} else 'mae',
-            ascending=(sort_by == 'mae')
-        ).reset_index(drop=True)
+            rows.append({
+                "iso_alpha_3": c,
+                "n_obs": n,
+                "mae_log": np.mean(np.abs(y_true_log[idx] - y_pred_log[idx])),
+                "rmse_log": np.sqrt(np.mean((y_true_log[idx] - y_pred_log[idx])**2)),
+                "mae_level": np.mean(np.abs(y_true_lvl[idx] - y_pred_lvl[idx]))
+            })
 
-        # Friendly note for small samples
-        small_counts = (self.y_test.groupby(countries).size() < min_obs).sum()
-        if small_counts > 0:
-            print(f"[Note] {small_counts} countries were excluded (fewer than {min_obs} test observations).")
+        df_err = (
+            pd.DataFrame(rows)
+            .sort_values("mae_log")
+            .reset_index(drop=True)
+        )
 
-        return df_metrics
-
-    def plot_per_country_metric(self,
-                                model: str = 'RandomForest',
-                                metric: str = 'mae',
-                                top_k: Optional[int] = 25):
+        return df_err
+    
+    def plot_per_country_errors(
+        self,
+        model: str = "XGBoost",
+        metric: str = "mae_log",
+        top_k: int = 25
+    ):
         """
-        Bar plot of per-country test-set metric for the specified model.
-
-        Parameters
-        ----------
-        model : {'RandomForest','XGBoost','ElasticNet','Median'}
-        metric : {'mae','r2'}
-            Which metric to plot. If 'r2', sorts descending (best first).
-        top_k : int or None
-            Show top K countries by metric ordering. If None, show all.
+        Bar plot of per-country errors.
         """
-        dfm = self.per_country_metrics(model=model, compute_r2=True)
-        if metric not in dfm.columns:
-            raise ValueError(f"Metric '{metric}' not available. Available: {list(dfm.columns)}")
 
-        # Sorting
-        if metric == 'mae':
-            dfp = dfm.sort_values('mae', ascending=True)
-            title = f"{model}: Per-country Test MAE (lower is better)"
-        else:  # r2
-            dfp = dfm.dropna(subset=['r2']).sort_values('r2', ascending=False)
-            title = f"{model}: Per-country Test R² (higher is better)"
+        df_err = self.per_country_errors(model=model)
 
-        if top_k is not None and len(dfp) > top_k:
-            dfp = dfp.head(top_k)
+        if metric not in df_err.columns:
+            raise ValueError(f"Metric must be one of {list(df_err.columns)}")
 
-        plt.figure(figsize=(10, max(4, 0.35*len(dfp))))
-        plt.barh(dfp['iso_alpha_3'], dfp[metric])
-        plt.xlabel(metric.upper())
-        plt.ylabel('iso_alpha_3')
-        plt.title(title)
+        dfp = df_err.sort_values(metric).head(top_k)
+
+        plt.figure(figsize=(10, max(4, 0.35 * len(dfp))))
+        plt.barh(dfp["iso_alpha_3"], dfp[metric])
+        plt.xlabel(metric.replace("_", " ").upper())
+        plt.ylabel("Country")
+        plt.title(f"{model}: Per-country {metric}")
         plt.gca().invert_yaxis()
         plt.tight_layout()
         plt.show()
+    
+    def _policy_columns(self):
+        return [
+            c for c in self.feature_cols
+            if "policy_flow" in c
+        ]
+    
+    def policy_marginal_effect(
+        self,
+        model: str = "XGBoost",
+        on: str = "test"
+    ) -> pd.DataFrame:
+        """
+        Compute marginal contribution of policy variables:
+        prediction(with policy) - prediction(with policy set to zero)
+        """
+
+        pipe = self._get_pipe_by_name(model)
+
+        if on == "test":
+            X = self.X_test.copy()
+            idx = self.X_test.index
+        else:
+            X = self.X_train.copy()
+            idx = self.X_train.index
+
+        policy_cols = self._policy_columns()
+
+        # Predictions with policy
+        y_hat_with = pipe.predict(X)
+
+        # Counterfactual: zero-out policy variables
+        X_no_policy = X.copy()
+        X_no_policy[policy_cols] = 0.0
+
+        y_hat_no = pipe.predict(X_no_policy)
+
+        df_out = self.df.loc[idx, [self.group_col, self.year_col]].copy()
+        df_out["delta_log_emissions"] = y_hat_with - y_hat_no
+        df_out["delta_emissions"] = (
+            np.exp(y_hat_with) - np.exp(y_hat_no)
+        )
+
+        return df_out
+    
+    def policy_effect_by_country(
+        self,
+        model: str = "XGBoost"
+    ) -> pd.DataFrame:
+        df = self.policy_marginal_effect(model=model)
+
+        return (
+            df.groupby(self.group_col)
+            .agg(
+                mean_delta_log=("delta_log_emissions", "mean"),
+                mean_delta_level=("delta_emissions", "mean"),
+                median_delta_level=("delta_emissions", "median"),
+                n_obs=("delta_emissions", "size")
+            )
+            .sort_values("mean_delta_log")
+            .reset_index()
+        )
+    
+    def plot_policy_effects(
+        self,
+        model: str = "XGBoost",
+        top_k: int = 25
+    ):
+        df = self.policy_effect_by_country(model=model)
+        dfp = df.sort_values("mean_delta_log").head(top_k)
+
+        plt.figure(figsize=(10, max(4, 0.35 * len(dfp))))
+        plt.barh(dfp[self.group_col], dfp["mean_delta_log"])
+        plt.xlabel("Mean Δ log emissions (policy effect)")
+        plt.ylabel("Country")
+        plt.title(f"{model}: Policy marginal contribution")
+        plt.gca().invert_yaxis()
+        plt.tight_layout()
+        plt.show()
+
+
+
+
+
+
 
 
 class EnsembleProjections:
