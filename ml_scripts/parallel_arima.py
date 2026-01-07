@@ -139,7 +139,7 @@ os.makedirs(MODELS_DIR_PATH, exist_ok=True)
 os.makedirs(TRAINING_DIR_PATH, exist_ok=True)
 
 training_df_log_transformed = pd.read_csv(
-    os.path.join(TRAINING_DIR_PATH, "training_df_log_transformed.csv"))
+    os.path.join(TRAINING_DIR_PATH, "training_df_top15_preds.csv"))
 training_df_log_transformed.head()
 
 numeric_cols = training_df_log_transformed.select_dtypes(include=["float64", "int64"]).columns.tolist()
