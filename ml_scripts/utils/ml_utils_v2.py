@@ -775,6 +775,122 @@ class EnsembleProjections:
         plt.show()
     
     @staticmethod
+    def plot_ensemble_time_series_grid(
+        df,
+        panels,
+        hist_df=None,
+        ncols=2,
+        figsize=(12, 8),
+        xlabel="Year",
+        save_path=None
+    ):
+        """
+        Multi-panel pony-tail plot for ensemble projections.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Ensemble dataframe with columns:
+            ['iso_alpha_3', 'future_id', 'year', <vars>]
+
+        panels : list of dict
+            Each dict defines one subplot with keys:
+            {
+                "iso": str,
+                "column": str,
+                "title": str (optional),
+                "ylabel": str (optional)
+            }
+
+            Length of panels should be 2 or 4 (or any number).
+
+        hist_df : pd.DataFrame, optional
+            Historical dataframe with same structure as df (no future_id).
+
+        ncols : int
+            Number of columns in subplot grid (default=2).
+
+        figsize : tuple
+            Figure size.
+
+        xlabel : str
+            Shared x-axis label.
+        """
+
+        n_panels = len(panels)
+        nrows = int(np.ceil(n_panels / ncols))
+
+        fig, axes = plt.subplots(nrows, ncols, figsize=figsize, sharex=True)
+        axes = np.atleast_1d(axes).flatten()
+
+        for ax, panel in zip(axes, panels):
+            iso = panel["iso"]
+            col = panel["column"]
+            title = panel.get("title", f"{iso} – {col}")
+            ylabel = panel.get("ylabel", col)
+
+            # --- Subset ensemble ---
+            ens = (
+                df[df["iso_alpha_3"] == iso]
+                .sort_values(["future_id", "year"])
+            )
+
+            # --- Plot ensemble members ---
+            for _, grp in ens.groupby("future_id"):
+                ax.plot(
+                    grp["year"],
+                    grp[col],
+                    color="gray",
+                    linewidth=1,
+                    alpha=0.4
+                )
+
+            # --- Overlay historical series ---
+            if hist_df is not None:
+                hist = (
+                    hist_df[hist_df["iso_alpha_3"] == iso]
+                    .sort_values("year")
+                )
+                if not hist.empty and col in hist.columns:
+                    ax.plot(
+                        hist["year"],
+                        hist[col],
+                        color="black",
+                        linewidth=2.5,
+                        marker="o",
+                        label="Historical"
+                    )
+
+            ax.set_title(title)
+            ax.set_ylabel(ylabel)
+            ax.grid(alpha=0.2)
+
+        # --- Remove unused axes ---
+        for ax in axes[n_panels:]:
+            ax.axis("off")
+
+        # --- Shared labels ---
+        for ax in axes[-ncols:]:
+            ax.set_xlabel(xlabel)
+
+        # --- Legend (single) ---
+        if hist_df is not None:
+            handles, labels = axes[0].get_legend_handles_labels()
+            if handles:
+                fig.legend(handles, labels, loc="upper center", ncol=2)
+
+
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+        # ---- SAVE FIGURE (IMPORTANT) ----
+        if save_path is not None:
+            fig.savefig(save_path, bbox_inches="tight")
+
+        plt.show()
+        plt.close(fig)
+        
+    
+    @staticmethod
     def predict_ensemble_emissions(
         ensemble_df: pd.DataFrame,
         model: Any,
