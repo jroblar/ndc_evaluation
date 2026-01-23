@@ -6,12 +6,18 @@ from typing import List, Any
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, OneHotEncoder
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import ElasticNetCV, LinearRegression
+from sklearn.linear_model import ElasticNetCV, LinearRegression, Ridge
 from sklearn.dummy import DummyRegressor
 from sklearn.model_selection import GroupKFold, TimeSeriesSplit, GridSearchCV, cross_val_score, train_test_split, RandomizedSearchCV, KFold, cross_validate
-from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
+from sklearn.metrics import mean_absolute_error, r2_score, root_mean_squared_error
 from sklearn.compose import ColumnTransformer
-from xgboost import XGBRegressor
+try:
+    import xgboost as xgb
+    from xgboost import XGBRegressor
+    _HAS_XGB = True
+except ImportError:
+    _HAS_XGB = False
+from sklearn.inspection import permutation_importance
 
 from scipy.stats import qmc
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
@@ -43,12 +49,14 @@ class RegressionAnalysis:
         scaler_type: str = "standard",
         xgb_params: dict = None,
         rf_params: dict = None,
+        include_year: bool = False,
     ):
         self.df = df.copy()
         self.target_col = target_col
         self.group_col = group_col
         self.year_col = year_col
         self.feature_cols = feature_cols.copy()
+        self.include_year = include_year
 
         self.scaler_type = scaler_type.lower()
         self.holdout_years = holdout_years
@@ -97,7 +105,10 @@ class RegressionAnalysis:
         raise ValueError(f"Unknown scaler_type={self.scaler_type}")
 
     def _make_preprocessor(self, include_group: bool):
-        feats = self.feature_cols + [self.year_col]
+        feats = self.feature_cols.copy()
+        if self.include_year:
+            feats.append(self.year_col)
+
         if include_group:
             feats = feats + [self.group_col]
 
@@ -226,7 +237,7 @@ class RegressionAnalysis:
         """
         RMSE in log space.
         """
-        return np.sqrt(mean_squared_error(y_true_log, y_pred_log))
+        return root_mean_squared_error(y_true_log, y_pred_log)
 
     
     
@@ -585,11 +596,151 @@ class RegressionAnalysis:
         plt.show()
 
 
+class FeaturePredictiveEvaluator:
+    """
+    Evaluate the predictive usefulness of a single feature for emissions models.
+    """
 
+    def __init__(
+        self,
+        df,
+        target_col="total_emissions",
+        country_col="iso_alpha_3",
+        year_col="year",
+        group_col="iso_alpha_3",
+        include_year=True,
+        log_target=True,
+        n_splits=5,
+        random_state=0,
+    ):
+        self.df = df.copy()
+        self.target_col = target_col
+        self.country_col = country_col
+        self.year_col = year_col
+        self.group_col = group_col
+        self.log_target = log_target
+        self.n_splits = n_splits
+        self.random_state = random_state
+        self.include_year = include_year
 
+        self._prepare_target()
+        self._prepare_baseline()
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
+    def _prepare_target(self):
+        y = self.df[self.target_col].values
+        if self.log_target:
+            y = np.log(y)
+        self.y = y
 
+    def _prepare_baseline(self):
+        cols = [self.country_col]
+        if self.include_year:
+            cols.append(self.year_col)
+
+        self.X_base = pd.get_dummies(
+            self.df[cols],
+            drop_first=True
+        )
+
+        self.groups = self.df[self.group_col]
+        self.cv = GroupKFold(n_splits=self.n_splits)
+
+    def _cv_rmse(self, X, model):
+        rmses = []
+        for train, test in self.cv.split(X, self.y, self.groups):
+            model.fit(X.iloc[train], self.y[train])
+            preds = model.predict(X.iloc[test])
+            rmses.append(
+                root_mean_squared_error(self.y[test], preds)
+            )
+        return float(np.mean(rmses))
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def within_group_std(self, feature):
+        return (
+            self.df
+            .groupby(self.group_col)[feature]
+            .std()
+            .median()
+        )
+
+    def evaluate_feature(
+        self,
+        feature,
+        ridge_alpha=1.0,
+        test_xgboost=True,
+        n_perm=20,
+    ):
+        """
+        Run full predictive diagnostics for a single feature.
+        """
+
+        results = {}
+
+        # 1. Variability check
+        results["median_within_group_std"] = self.within_group_std(feature)
+
+        # 2. Ridge regression RMSE
+        ridge = Ridge(alpha=ridge_alpha)
+
+        X_feat = pd.concat(
+            [self.X_base, self.df[[feature]]],
+            axis=1
+        )
+
+        results["rmse_base_ridge"] = self._cv_rmse(self.X_base, ridge)
+        results["rmse_with_feature_ridge"] = self._cv_rmse(X_feat, ridge)
+        results["rmse_delta_ridge"] = (
+            results["rmse_with_feature_ridge"]
+            - results["rmse_base_ridge"]
+        )
+
+        # 3. Permutation importance (trained on full sample)
+        ridge.fit(X_feat, self.y)
+
+        perm = permutation_importance(
+            ridge,
+            X_feat,
+            self.y,
+            n_repeats=n_perm,
+            random_state=self.random_state,
+        )
+
+        results["permutation_importance"] = float(
+            perm.importances_mean[X_feat.columns.get_loc(feature)]
+        )
+
+        # 4. Optional nonlinear test
+        if test_xgboost and _HAS_XGB:
+            xgb = XGBRegressor(
+                n_estimators=300,
+                max_depth=4,
+                learning_rate=0.05,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                random_state=self.random_state,
+                n_jobs=-1,
+            )
+
+            results["rmse_base_xgb"] = self._cv_rmse(self.X_base, xgb)
+            results["rmse_with_feature_xgb"] = self._cv_rmse(X_feat, xgb)
+            results["rmse_delta_xgb"] = (
+                results["rmse_with_feature_xgb"]
+                - results["rmse_base_xgb"]
+            )
+        else:
+            results["rmse_base_xgb"] = np.nan
+            results["rmse_with_feature_xgb"] = np.nan
+            results["rmse_delta_xgb"] = np.nan
+
+        return pd.Series(results)
 
 class EnsembleProjections:
 
