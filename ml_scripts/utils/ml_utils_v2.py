@@ -696,7 +696,7 @@ class FeaturePredictiveEvaluator:
         )
         return Pipeline([("pre", pre), ("xgb", xgb_model)])
 
-    def _cv_rmse_pipeline(
+    def _cv_mae_pipeline(
         self,
         pipeline: Pipeline,
         X: pd.DataFrame,
@@ -716,9 +716,37 @@ class FeaturePredictiveEvaluator:
                 fold_pipe.fit(X.iloc[train], y[train])
                 preds = fold_pipe.predict(X.iloc[test])
             rmses.append(
-                root_mean_squared_error(y[test], preds)
+                mean_absolute_error(y[test], preds)
             )
         return float(np.mean(rmses))
+
+    def _cv_mae_pipeline_level(
+        self,
+        pipeline: Pipeline,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        groups: pd.Series,
+    ) -> float:
+        maes = []
+        for train, test in self.cv.split(X, y, groups):
+            fold_pipe = clone(pipeline)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Found unknown categories in columns",
+                    category=UserWarning,
+                    module=r"sklearn\.preprocessing\._encoders",
+                )
+                fold_pipe.fit(X.iloc[train], y[train])
+                preds = fold_pipe.predict(X.iloc[test])
+            if self.log_target:
+                y_true = np.exp(y[test])
+                y_pred = np.exp(preds)
+            else:
+                y_true = y[test]
+                y_pred = preds
+            maes.append(mean_absolute_error(y_true, y_pred))
+        return float(np.mean(maes))
 
     # ------------------------------------------------------------------
     # Public API
@@ -754,15 +782,25 @@ class FeaturePredictiveEvaluator:
         ridge_base_pipe = self._make_ridge_pipeline(self.baseline_cols)
         ridge_feat_pipe = self._make_ridge_pipeline(self.baseline_cols + [feature])
 
-        results["rmse_base_ridge"] = self._cv_rmse_pipeline(
+        results["mae_base_ridge"] = self._cv_mae_pipeline(
             ridge_base_pipe, self.X_base, self.y, self.groups
         )
-        results["rmse_with_feature_ridge"] = self._cv_rmse_pipeline(
+        results["mae_with_feature_ridge"] = self._cv_mae_pipeline(
             ridge_feat_pipe, X_feat, self.y, self.groups
         )
-        results["rmse_delta_ridge"] = (
-            results["rmse_with_feature_ridge"]
-            - results["rmse_base_ridge"]
+        results["mae_delta_ridge"] = (
+            results["mae_with_feature_ridge"]
+            - results["mae_base_ridge"]
+        )
+        results["mae_base_ridge_level"] = self._cv_mae_pipeline_level(
+            ridge_base_pipe, self.X_base, self.y, self.groups
+        )
+        results["mae_with_feature_ridge_level"] = self._cv_mae_pipeline_level(
+            ridge_feat_pipe, X_feat, self.y, self.groups
+        )
+        results["mae_delta_ridge_level"] = (
+            results["mae_with_feature_ridge_level"]
+            - results["mae_base_ridge_level"]
         )
 
         # 3. Permutation importance (trained on full sample)
@@ -799,20 +837,33 @@ class FeaturePredictiveEvaluator:
             xgb_base_pipe = self._make_xgb_pipeline(self.baseline_cols)
             xgb_feat_pipe = self._make_xgb_pipeline(self.baseline_cols + [feature])
 
-            results["rmse_base_xgb"] = self._cv_rmse_pipeline(
+            results["mae_base_xgb"] = self._cv_mae_pipeline(
                 xgb_base_pipe, self.X_base, self.y, self.groups
             )
-            results["rmse_with_feature_xgb"] = self._cv_rmse_pipeline(
+            results["mae_with_feature_xgb"] = self._cv_mae_pipeline(
                 xgb_feat_pipe, X_feat, self.y, self.groups
             )
-            results["rmse_delta_xgb"] = (
-                results["rmse_with_feature_xgb"]
-                - results["rmse_base_xgb"]
+            results["mae_delta_xgb"] = (
+                results["mae_with_feature_xgb"]
+                - results["mae_base_xgb"]
+            )
+            results["mae_base_xgb_level"] = self._cv_mae_pipeline_level(
+                xgb_base_pipe, self.X_base, self.y, self.groups
+            )
+            results["mae_with_feature_xgb_level"] = self._cv_mae_pipeline_level(
+                xgb_feat_pipe, X_feat, self.y, self.groups
+            )
+            results["mae_delta_xgb_level"] = (
+                results["mae_with_feature_xgb_level"]
+                - results["mae_base_xgb_level"]
             )
         else:
-            results["rmse_base_xgb"] = np.nan
-            results["rmse_with_feature_xgb"] = np.nan
-            results["rmse_delta_xgb"] = np.nan
+            results["mae_base_xgb"] = np.nan
+            results["mae_with_feature_xgb"] = np.nan
+            results["mae_delta_xgb"] = np.nan
+            results["mae_base_xgb_level"] = np.nan
+            results["mae_with_feature_xgb_level"] = np.nan
+            results["mae_delta_xgb_level"] = np.nan
 
         return pd.Series(results)
 
