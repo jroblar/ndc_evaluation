@@ -6,11 +6,12 @@ from typing import List, Any
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, OneHotEncoder
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import ElasticNetCV, LinearRegression, Ridge
+from sklearn.linear_model import ElasticNetCV, RidgeCV
 from sklearn.dummy import DummyRegressor
 from sklearn.model_selection import GroupKFold, TimeSeriesSplit, GridSearchCV, cross_val_score, train_test_split, RandomizedSearchCV, KFold, cross_validate
 from sklearn.metrics import mean_absolute_error, r2_score, root_mean_squared_error
 from sklearn.compose import ColumnTransformer
+from sklearn.base import clone
 try:
     import xgboost as xgb
     from xgboost import XGBRegressor
@@ -49,6 +50,7 @@ class RegressionAnalysis:
         scaler_type: str = "standard",
         xgb_params: dict = None,
         rf_params: dict = None,
+        enet_params: dict = None,
         include_year: bool = False,
     ):
         self.df = df.copy()
@@ -77,6 +79,14 @@ class RegressionAnalysis:
             max_depth=None,
             random_state=42,
             n_jobs=-1,
+        )
+
+        self.enet_params = enet_params or dict(
+            l1_ratio=[0.2, 0.5, 0.8],
+            cv=5,
+            n_jobs=-1,
+            max_iter=10000,
+            random_state=42,
         )
 
         # --- Split train / test by time ---
@@ -138,13 +148,7 @@ class RegressionAnalysis:
         self.pipe_enet = Pipeline(
             [
                 ("pre", pre_enet),
-                ("enet", ElasticNetCV(
-                    l1_ratio=[0.2, 0.5, 0.8],
-                    cv=5,
-                    n_jobs=-1,
-                    max_iter=10000,
-                    random_state=42,
-                )),
+                ("enet", ElasticNetCV(**self.enet_params)),
             ]
         )
 
@@ -603,15 +607,16 @@ class FeaturePredictiveEvaluator:
 
     def __init__(
         self,
-        df,
-        target_col="total_emissions",
-        country_col="iso_alpha_3",
-        year_col="year",
-        group_col="iso_alpha_3",
-        include_year=True,
-        log_target=True,
-        n_splits=5,
-        random_state=0,
+        df: pd.DataFrame,
+        target_col: str = "total_emissions",
+        country_col: str = "iso_alpha_3",
+        year_col: str = "year",
+        group_col: str = "iso_alpha_3",
+        include_year: bool = True,
+        log_target: bool = True,
+        n_splits: int = 5,
+        random_state: int = 0,
+        scaler_type: str = "standard",
     ):
         self.df = df.copy()
         self.target_col = target_col
@@ -622,6 +627,7 @@ class FeaturePredictiveEvaluator:
         self.n_splits = n_splits
         self.random_state = random_state
         self.include_year = include_year
+        self.scaler_type = scaler_type.lower()
 
         self._prepare_target()
         self._prepare_baseline()
@@ -637,25 +643,80 @@ class FeaturePredictiveEvaluator:
         self.y = y
 
     def _prepare_baseline(self):
-        cols = [self.country_col]
+        self.baseline_cols = [self.country_col]
         if self.include_year:
-            cols.append(self.year_col)
+            self.baseline_cols.append(self.year_col)
 
-        self.X_base = pd.get_dummies(
-            self.df[cols],
-            drop_first=True
-        )
-
+        self.X_base = self.df[self.baseline_cols].copy()
         self.groups = self.df[self.group_col]
         self.cv = GroupKFold(n_splits=self.n_splits)
 
-    def _cv_rmse(self, X, model):
+    def _get_scaler(self):
+        if self.scaler_type == "standard":
+            return StandardScaler()
+        if self.scaler_type == "robust":
+            return RobustScaler()
+        if self.scaler_type == "minmax":
+            return MinMaxScaler()
+        raise ValueError(f"Unknown scaler_type={self.scaler_type}")
+
+    def _make_preprocessor(self, features: list[str]) -> ColumnTransformer:
+        categorical = [c for c in features if self.df[c].dtype == "object"]
+        numeric = [c for c in features if c not in categorical]
+
+        return ColumnTransformer(
+            transformers=[
+                ("num", Pipeline([
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("scaler", self._get_scaler()),
+                ]), numeric),
+
+                ("cat", Pipeline([
+                    ("imputer", SimpleImputer(strategy="most_frequent")),
+                    ("onehot", OneHotEncoder(drop="first", handle_unknown="ignore")),
+                ]), categorical),
+            ]
+        )
+
+    def _make_ridge_pipeline(self, features: list[str]) -> Pipeline:
+        pre = self._make_preprocessor(features)
+        ridge = RidgeCV(alphas=np.logspace(-3, 3, 25))
+        return Pipeline([("pre", pre), ("ridge", ridge)])
+
+    def _make_xgb_pipeline(self, features: list[str]) -> Pipeline:
+        pre = self._make_preprocessor(features)
+        xgb_model = XGBRegressor(
+            n_estimators=300,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=self.random_state,
+            n_jobs=-1,
+        )
+        return Pipeline([("pre", pre), ("xgb", xgb_model)])
+
+    def _cv_rmse_pipeline(
+        self,
+        pipeline: Pipeline,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        groups: pd.Series,
+    ) -> float:
         rmses = []
-        for train, test in self.cv.split(X, self.y, self.groups):
-            model.fit(X.iloc[train], self.y[train])
-            preds = model.predict(X.iloc[test])
+        for train, test in self.cv.split(X, y, groups):
+            fold_pipe = clone(pipeline)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Found unknown categories in columns",
+                    category=UserWarning,
+                    module=r"sklearn\.preprocessing\._encoders",
+                )
+                fold_pipe.fit(X.iloc[train], y[train])
+                preds = fold_pipe.predict(X.iloc[test])
             rmses.append(
-                root_mean_squared_error(self.y[test], preds)
+                root_mean_squared_error(y[test], preds)
             )
         return float(np.mean(rmses))
 
@@ -663,7 +724,7 @@ class FeaturePredictiveEvaluator:
     # Public API
     # ------------------------------------------------------------------
 
-    def within_group_std(self, feature):
+    def within_group_std(self, feature: str) -> float:
         return (
             self.df
             .groupby(self.group_col)[feature]
@@ -673,11 +734,11 @@ class FeaturePredictiveEvaluator:
 
     def evaluate_feature(
         self,
-        feature,
-        ridge_alpha=1.0,
-        test_xgboost=True,
-        n_perm=20,
-    ):
+        feature: str,
+        ridge_alpha: float = 1.0,
+        test_xgboost: bool = True,
+        n_perm: int = 20,
+    ) -> pd.Series:
         """
         Run full predictive diagnostics for a single feature.
         """
@@ -688,49 +749,62 @@ class FeaturePredictiveEvaluator:
         results["median_within_group_std"] = self.within_group_std(feature)
 
         # 2. Ridge regression RMSE
-        ridge = Ridge(alpha=ridge_alpha)
+        X_feat = pd.concat([self.X_base, self.df[[feature]]], axis=1)
 
-        X_feat = pd.concat(
-            [self.X_base, self.df[[feature]]],
-            axis=1
+        ridge_base_pipe = self._make_ridge_pipeline(self.baseline_cols)
+        ridge_feat_pipe = self._make_ridge_pipeline(self.baseline_cols + [feature])
+
+        results["rmse_base_ridge"] = self._cv_rmse_pipeline(
+            ridge_base_pipe, self.X_base, self.y, self.groups
         )
-
-        results["rmse_base_ridge"] = self._cv_rmse(self.X_base, ridge)
-        results["rmse_with_feature_ridge"] = self._cv_rmse(X_feat, ridge)
+        results["rmse_with_feature_ridge"] = self._cv_rmse_pipeline(
+            ridge_feat_pipe, X_feat, self.y, self.groups
+        )
         results["rmse_delta_ridge"] = (
             results["rmse_with_feature_ridge"]
             - results["rmse_base_ridge"]
         )
 
         # 3. Permutation importance (trained on full sample)
-        ridge.fit(X_feat, self.y)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Found unknown categories in columns",
+                category=UserWarning,
+                module=r"sklearn\.preprocessing\._encoders",
+            )
+            ridge_feat_pipe.fit(X_feat, self.y)
 
-        perm = permutation_importance(
-            ridge,
-            X_feat,
-            self.y,
-            n_repeats=n_perm,
-            random_state=self.random_state,
-        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Found unknown categories in columns",
+                category=UserWarning,
+                module=r"sklearn\.preprocessing\._encoders",
+            )
+            perm = permutation_importance(
+                ridge_feat_pipe,
+                X_feat,
+                self.y,
+                n_repeats=n_perm,
+                random_state=self.random_state,
+            )
 
         results["permutation_importance"] = float(
-            perm.importances_mean[X_feat.columns.get_loc(feature)]
+            perm.importances_mean[list(X_feat.columns).index(feature)]
         )
 
         # 4. Optional nonlinear test
         if test_xgboost and _HAS_XGB:
-            xgb = XGBRegressor(
-                n_estimators=300,
-                max_depth=4,
-                learning_rate=0.05,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                random_state=self.random_state,
-                n_jobs=-1,
-            )
+            xgb_base_pipe = self._make_xgb_pipeline(self.baseline_cols)
+            xgb_feat_pipe = self._make_xgb_pipeline(self.baseline_cols + [feature])
 
-            results["rmse_base_xgb"] = self._cv_rmse(self.X_base, xgb)
-            results["rmse_with_feature_xgb"] = self._cv_rmse(X_feat, xgb)
+            results["rmse_base_xgb"] = self._cv_rmse_pipeline(
+                xgb_base_pipe, self.X_base, self.y, self.groups
+            )
+            results["rmse_with_feature_xgb"] = self._cv_rmse_pipeline(
+                xgb_feat_pipe, X_feat, self.y, self.groups
+            )
             results["rmse_delta_xgb"] = (
                 results["rmse_with_feature_xgb"]
                 - results["rmse_base_xgb"]
