@@ -52,6 +52,7 @@ class RegressionAnalysis:
         rf_params: dict = None,
         enet_params: dict = None,
         include_year: bool = False,
+        include_group_enet: bool = True,
     ):
         self.df = df.copy()
         self.target_col = target_col
@@ -59,6 +60,7 @@ class RegressionAnalysis:
         self.year_col = year_col
         self.feature_cols = feature_cols.copy()
         self.include_year = include_year
+        self.include_group_enet =include_group_enet
 
         self.scaler_type = scaler_type.lower()
         self.holdout_years = holdout_years
@@ -144,7 +146,7 @@ class RegressionAnalysis:
     # -------------------------
     def _build_pipelines(self):
         # ElasticNet → ISO fixed effects
-        pre_enet = self._make_preprocessor(include_group=True)
+        pre_enet = self._make_preprocessor(include_group=self.include_group_enet)
         self.pipe_enet = Pipeline(
             [
                 ("pre", pre_enet),
