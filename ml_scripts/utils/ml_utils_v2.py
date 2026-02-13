@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from typing import List, Any
 
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, OneHotEncoder
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, OneHotEncoder, FunctionTransformer
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import ElasticNetCV, RidgeCV
 from sklearn.dummy import DummyRegressor
@@ -12,6 +12,8 @@ from sklearn.model_selection import GroupKFold, TimeSeriesSplit, GridSearchCV, c
 from sklearn.metrics import mean_absolute_error, r2_score, root_mean_squared_error
 from sklearn.compose import ColumnTransformer
 from sklearn.base import clone
+from sklearn.decomposition import PCA
+from scipy import sparse
 try:
     import xgboost as xgb
     from xgboost import XGBRegressor
@@ -53,6 +55,9 @@ class RegressionAnalysis:
         enet_params: dict = None,
         include_year: bool = False,
         include_group_enet: bool = True,
+        use_pca_enet: bool = False,
+        enet_pca_n_components: Optional[int] = None,
+        enet_pca_random_state: int = 42,
     ):
         self.df = df.copy()
         self.target_col = target_col
@@ -61,6 +66,9 @@ class RegressionAnalysis:
         self.feature_cols = feature_cols.copy()
         self.include_year = include_year
         self.include_group_enet =include_group_enet
+        self.use_pca_enet = use_pca_enet
+        self.enet_pca_n_components = enet_pca_n_components
+        self.enet_pca_random_state = enet_pca_random_state
 
         self.scaler_type = scaler_type.lower()
         self.holdout_years = holdout_years
@@ -140,6 +148,11 @@ class RegressionAnalysis:
                 ]), categorical),
             ]
         )
+    
+    def _to_dense(self, X):
+        if sparse.issparse(X):
+            return X.toarray()
+        return X
 
     # -------------------------
     # Pipelines
@@ -147,12 +160,25 @@ class RegressionAnalysis:
     def _build_pipelines(self):
         # ElasticNet → ISO fixed effects
         pre_enet = self._make_preprocessor(include_group=self.include_group_enet)
-        self.pipe_enet = Pipeline(
-            [
-                ("pre", pre_enet),
-                ("enet", ElasticNetCV(**self.enet_params)),
-            ]
-        )
+        if self.use_pca_enet:
+            self.pipe_enet = Pipeline(
+                [
+                    ("pre", pre_enet),
+                    ("to_dense", FunctionTransformer(self._to_dense, accept_sparse=True)),
+                    ("pca", PCA(
+                        n_components=self.enet_pca_n_components,
+                        random_state=self.enet_pca_random_state,
+                    )),
+                    ("enet", ElasticNetCV(**self.enet_params)),
+                ]
+            )
+        else:
+            self.pipe_enet = Pipeline(
+                [
+                    ("pre", pre_enet),
+                    ("enet", ElasticNetCV(**self.enet_params)),
+                ]
+            )
 
         # Random Forest → no ISO
         pre_rf = self._make_preprocessor(include_group=False)
@@ -446,6 +472,97 @@ class RegressionAnalysis:
                 "model must be one of: "
                 "['RandomForest', 'XGBoost', 'ElasticNet', 'Median']"
             )
+    
+    def _make_estimator(self, model: str):
+        model = model.strip().lower()
+        if model == "randomforest":
+            return "rf", RandomForestRegressor(**self.rf_params)
+        if model == "xgboost":
+            if not _HAS_XGB:
+                raise RuntimeError("XGBoost is not available in this environment.")
+            return "xgb", XGBRegressor(**self.xgb_params)
+        if model == "elasticnet":
+            return "enet", ElasticNetCV(**self.enet_params)
+        if model == "median":
+            return "median", DummyRegressor(strategy="median")
+        raise ValueError(
+            "model must be one of: "
+            "['RandomForest', 'XGBoost', 'ElasticNet', 'Median']"
+        )
+    
+    def pca_experiment(
+        self,
+        model: str = "ElasticNet",
+        n_components: Optional[int] = None,
+        plot: bool = True,
+        random_state: int = 42,
+    ) -> pd.DataFrame:
+        """
+        Run PCA ablation: fit with all PCs, then drop one PC at a time
+        starting from the lowest-variance component, and track holdout MAE (level).
+        """
+
+        model_l = model.strip().lower()
+        include_group = self.include_group_enet if model_l == "elasticnet" else False
+
+        pre_tmp = self._make_preprocessor(include_group=include_group)
+        X_train_pre = pre_tmp.fit_transform(self.X_train)
+        X_train_pre = self._to_dense(X_train_pre)
+
+        max_components = min(X_train_pre.shape[0], X_train_pre.shape[1])
+        if n_components is None:
+            n_components = max_components
+        else:
+            n_components = int(n_components)
+            n_components = min(n_components, max_components)
+        if n_components < 1:
+            raise ValueError("n_components must be >= 1 after preprocessing.")
+
+        results = []
+        for k in range(n_components, 0, -1):
+            pre = self._make_preprocessor(include_group=include_group)
+            est_name, est = self._make_estimator(model)
+            pipe = Pipeline(
+                [
+                    ("pre", pre),
+                    ("to_dense", FunctionTransformer(self._to_dense, accept_sparse=True)),
+                    ("pca", PCA(n_components=k, random_state=random_state)),
+                    (est_name, est),
+                ]
+            )
+
+            pipe.fit(self.X_train, self.y_train)
+            preds = pipe.predict(self.X_test)
+            mae_level = self._mae_level_space(self.y_test, preds)
+
+            results.append(
+                {
+                    "n_components": k,
+                    "removed_components": n_components - k,
+                    "test_mae_level": mae_level,
+                }
+            )
+
+        df_res = (
+            pd.DataFrame(results)
+            .sort_values("n_components", ascending=False)
+            .reset_index(drop=True)
+        )
+
+        if plot:
+            plt.figure(figsize=(8, 5))
+            plt.plot(
+                df_res["removed_components"],
+                df_res["test_mae_level"],
+                marker="o",
+            )
+            plt.xlabel("PCs removed (lowest variance first)")
+            plt.ylabel("Holdout MAE (level)")
+            plt.title(f"{model}: PCA ablation on holdout set")
+            plt.tight_layout()
+            plt.show()
+
+        return df_res
 
         
     def per_country_errors(
