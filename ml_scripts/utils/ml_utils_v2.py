@@ -720,6 +720,66 @@ class RegressionAnalysis:
 
         return df_res
 
+    def enet_l1_ratio_experiment(
+        self,
+        l1_ratios: Iterable[float],
+        plot: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Fit ElasticNet across different l1_ratio values and evaluate holdout MAE (level).
+
+        Parameters
+        ----------
+        l1_ratios : iterable of float
+            l1_ratio values to evaluate.
+        plot : bool, default=True
+            If True, plot holdout MAE (level) against l1_ratio.
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns:
+            - l1_ratio
+            - test_mae_level
+            - selected_alpha
+            - n_iter
+        """
+        ratios = [float(v) for v in l1_ratios]
+        if len(ratios) == 0:
+            raise ValueError("l1_ratios must contain at least one value.")
+
+        results = []
+        for ratio in ratios:
+            pipe = clone(self.pipe_enet)
+            pipe.set_params(enet__l1_ratio=ratio)
+            pipe.fit(self.X_train, self.y_train)
+
+            preds = pipe.predict(self.X_test)
+            mae_level = self._mae_level_space(self.y_test, preds)
+
+            enet_est = pipe.named_steps["enet"]
+            results.append(
+                {
+                    "l1_ratio": ratio,
+                    "test_mae_level": mae_level,
+                    "selected_alpha": float(enet_est.alpha_) if hasattr(enet_est, "alpha_") else np.nan,
+                    "n_iter": enet_est.n_iter_ if hasattr(enet_est, "n_iter_") else np.nan,
+                }
+            )
+
+        df_res = pd.DataFrame(results).sort_values("l1_ratio").reset_index(drop=True)
+
+        if plot:
+            plt.figure(figsize=(8, 5))
+            plt.plot(df_res["l1_ratio"], df_res["test_mae_level"], marker="o")
+            plt.xlabel("ElasticNet l1_ratio")
+            plt.ylabel("Holdout MAE (level)")
+            plt.title("ElasticNet l1_ratio sweep on holdout set")
+            plt.tight_layout()
+            plt.show()
+
+        return df_res
+
     def feature_ablation_experiment(
         self,
         model: str = "ElasticNet",
