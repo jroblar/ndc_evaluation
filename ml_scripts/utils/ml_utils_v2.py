@@ -124,8 +124,8 @@ class RegressionAnalysis:
             return MinMaxScaler()
         raise ValueError(f"Unknown scaler_type={self.scaler_type}")
 
-    def _make_preprocessor(self, include_group: bool):
-        feats = self.feature_cols.copy()
+    def _make_preprocessor(self, include_group: bool, features: Optional[list] = None):
+        feats = self.feature_cols.copy() if features is None else features.copy()
         if self.include_year:
             feats.append(self.year_col)
 
@@ -168,15 +168,18 @@ class RegressionAnalysis:
         self,
         n_components: Optional[int] = None,
         random_state: Optional[int] = None,
+        features: Optional[list] = None,
+        include_group: Optional[bool] = None,
     ):
         n_components = self.enet_pca_n_components if n_components is None else n_components
         random_state = self.enet_pca_random_state if random_state is None else random_state
+        include_group = self.include_group_enet if include_group is None else include_group
 
         # Keep group dummies out of PCA so fixed effects remain explicit regressors.
-        if self.include_group_enet:
+        if include_group:
             pca_branch = Pipeline(
                 [
-                    ("pre_no_group", self._make_preprocessor(include_group=False)),
+                    ("pre_no_group", self._make_preprocessor(include_group=False, features=features)),
                     ("to_dense", FunctionTransformer(self._to_dense, accept_sparse=True)),
                     ("pca", PCA(
                         n_components=n_components,
@@ -196,7 +199,7 @@ class RegressionAnalysis:
                 ]
             )
 
-        pre = self._make_preprocessor(include_group=False)
+        pre = self._make_preprocessor(include_group=False, features=features)
         return Pipeline(
             [
                 ("pre", pre),
@@ -611,6 +614,77 @@ class RegressionAnalysis:
             plt.xlabel("PCs removed (lowest variance first)")
             plt.ylabel("Holdout MAE (level)")
             plt.title(f"{model}: PCA ablation on holdout set")
+            plt.tight_layout()
+            plt.show()
+
+        return df_res
+
+    def feature_ablation_experiment(
+        self,
+        model: str = "ElasticNet",
+        plot: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Ablation over numeric feature_cols only:
+        - always keeps country dummies (group_col) in the model
+        - removes one numeric feature at a time
+        - removal order follows feature_cols order from the end to the start
+        - reports holdout MAE in level space
+        """
+        model_l = model.strip().lower()
+        base_features = self.feature_cols.copy()
+        numeric_removal_order = [
+            c for c in base_features if self.df[c].dtype != "object"
+        ][::-1]
+
+        removed = []
+        results = []
+
+        for step in range(len(numeric_removal_order) + 1):
+            current_features = [c for c in base_features if c not in removed]
+
+            if model_l == "elasticnet":
+                pipe = Pipeline(
+                    [
+                        ("pre", self._make_preprocessor(include_group=True, features=current_features)),
+                        ("enet", ElasticNetCV(**self.enet_params)),
+                    ]
+                )
+            elif model_l == "median":
+                pipe = Pipeline([("median", DummyRegressor(strategy="median"))])
+            else:
+                est_name, est = self._make_estimator(model)
+                pipe = Pipeline(
+                    [
+                        ("pre", self._make_preprocessor(include_group=True, features=current_features)),
+                        (est_name, est),
+                    ]
+                )
+
+            pipe.fit(self.X_train, self.y_train)
+            preds = pipe.predict(self.X_test)
+            mae_level = self._mae_level_space(self.y_test, preds)
+
+            results.append(
+                {
+                    "removed_feature": removed[-1] if removed else None,
+                    "n_removed": len(removed),
+                    "n_features_remaining": len(current_features),
+                    "test_mae_level": mae_level,
+                }
+            )
+
+            if step < len(numeric_removal_order):
+                removed.append(numeric_removal_order[step])
+
+        df_res = pd.DataFrame(results)
+
+        if plot:
+            plt.figure(figsize=(8, 5))
+            plt.plot(df_res["n_removed"], df_res["test_mae_level"], marker="o")
+            plt.xlabel("Numeric features removed (last to first in feature_cols)")
+            plt.ylabel("Holdout MAE (level)")
+            plt.title(f"{model}: Numeric feature ablation with country dummies retained")
             plt.tight_layout()
             plt.show()
 
