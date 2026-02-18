@@ -3,7 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from typing import List, Any
 
-from sklearn.pipeline import Pipeline
+from sklearn.pipeline import Pipeline, FeatureUnion
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, OneHotEncoder, FunctionTransformer
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import ElasticNetCV, RidgeCV
@@ -154,6 +154,61 @@ class RegressionAnalysis:
             return X.toarray()
         return X
 
+    def _make_group_dummy_preprocessor(self):
+        return ColumnTransformer(
+            transformers=[
+                ("cat", Pipeline([
+                    ("imputer", SimpleImputer(strategy="most_frequent")),
+                    ("onehot", OneHotEncoder(drop="first", handle_unknown="ignore")),
+                ]), [self.group_col]),
+            ]
+        )
+
+    def _make_enet_pca_pipeline(
+        self,
+        n_components: Optional[int] = None,
+        random_state: Optional[int] = None,
+    ):
+        n_components = self.enet_pca_n_components if n_components is None else n_components
+        random_state = self.enet_pca_random_state if random_state is None else random_state
+
+        # Keep group dummies out of PCA so fixed effects remain explicit regressors.
+        if self.include_group_enet:
+            pca_branch = Pipeline(
+                [
+                    ("pre_no_group", self._make_preprocessor(include_group=False)),
+                    ("to_dense", FunctionTransformer(self._to_dense, accept_sparse=True)),
+                    ("pca", PCA(
+                        n_components=n_components,
+                        random_state=random_state,
+                    )),
+                ]
+            )
+            group_branch = self._make_group_dummy_preprocessor()
+            return Pipeline(
+                [
+                    ("pre_split", FeatureUnion([
+                        ("pca_features", pca_branch),
+                        ("group_dummies", group_branch),
+                    ])),
+                    ("to_dense_after_union", FunctionTransformer(self._to_dense, accept_sparse=True)),
+                    ("enet", ElasticNetCV(**self.enet_params)),
+                ]
+            )
+
+        pre = self._make_preprocessor(include_group=False)
+        return Pipeline(
+            [
+                ("pre", pre),
+                ("to_dense", FunctionTransformer(self._to_dense, accept_sparse=True)),
+                ("pca", PCA(
+                    n_components=n_components,
+                    random_state=random_state,
+                )),
+                ("enet", ElasticNetCV(**self.enet_params)),
+            ]
+        )
+
     # -------------------------
     # Pipelines
     # -------------------------
@@ -161,17 +216,7 @@ class RegressionAnalysis:
         # ElasticNet → ISO fixed effects
         pre_enet = self._make_preprocessor(include_group=self.include_group_enet)
         if self.use_pca_enet:
-            self.pipe_enet = Pipeline(
-                [
-                    ("pre", pre_enet),
-                    ("to_dense", FunctionTransformer(self._to_dense, accept_sparse=True)),
-                    ("pca", PCA(
-                        n_components=self.enet_pca_n_components,
-                        random_state=self.enet_pca_random_state,
-                    )),
-                    ("enet", ElasticNetCV(**self.enet_params)),
-                ]
-            )
+            self.pipe_enet = self._make_enet_pca_pipeline()
         else:
             self.pipe_enet = Pipeline(
                 [
@@ -504,8 +549,12 @@ class RegressionAnalysis:
 
         model_l = model.strip().lower()
         include_group = self.include_group_enet if model_l == "elasticnet" else False
+        pre_tmp = self._make_preprocessor(
+            include_group=(include_group and model_l != "elasticnet")
+        )
+        if model_l == "elasticnet" and include_group:
+            pre_tmp = self._make_preprocessor(include_group=False)
 
-        pre_tmp = self._make_preprocessor(include_group=include_group)
         X_train_pre = pre_tmp.fit_transform(self.X_train)
         X_train_pre = self._to_dense(X_train_pre)
 
@@ -520,16 +569,19 @@ class RegressionAnalysis:
 
         results = []
         for k in range(n_components, 0, -1):
-            pre = self._make_preprocessor(include_group=include_group)
-            est_name, est = self._make_estimator(model)
-            pipe = Pipeline(
-                [
-                    ("pre", pre),
-                    ("to_dense", FunctionTransformer(self._to_dense, accept_sparse=True)),
-                    ("pca", PCA(n_components=k, random_state=random_state)),
-                    (est_name, est),
-                ]
-            )
+            if model_l == "elasticnet":
+                pipe = self._make_enet_pca_pipeline(n_components=k, random_state=random_state)
+            else:
+                pre = self._make_preprocessor(include_group=include_group)
+                est_name, est = self._make_estimator(model)
+                pipe = Pipeline(
+                    [
+                        ("pre", pre),
+                        ("to_dense", FunctionTransformer(self._to_dense, accept_sparse=True)),
+                        ("pca", PCA(n_components=k, random_state=random_state)),
+                        (est_name, est),
+                    ]
+                )
 
             pipe.fit(self.X_train, self.y_train)
             preds = pipe.predict(self.X_test)
@@ -720,30 +772,98 @@ class RegressionAnalysis:
     
     def get_enet_coef_table(
         self,
+        back_project_pca: bool = False,
+        only_group_dummies: bool = False,
     ):
-
-        feature_names = self.pipe_enet[:-1].get_feature_names_out()
-
         coefs = self.pipe_enet.named_steps["enet"].coef_
+        using_pca = self.use_pca_enet and (
+            "pca" in self.pipe_enet.named_steps or "pre_split" in self.pipe_enet.named_steps
+        )
+        using_split_pca = using_pca and "pre_split" in self.pipe_enet.named_steps
 
-        coef_table = (
-            pd.DataFrame({
-                "feature": feature_names,
-                "coef": coefs,
-                "abs_coef": abs(coefs)
-            })
-            .sort_values("abs_coef", ascending=False)
-        ) 
+        # With PCA enabled, ElasticNet coefficients are on principal components.
+        # Optionally back-project to the preprocessed feature space.
+        if using_pca and not back_project_pca:
+            if using_split_pca:
+                pre_split = self.pipe_enet.named_steps["pre_split"]
+                pca_branch = dict(pre_split.transformer_list)["pca_features"]
+                group_branch = dict(pre_split.transformer_list)["group_dummies"]
 
-        coef_table["type"] = coef_table["feature"].apply(lambda x: x.split("_")[0])
-        coef_table["clean_feature_name"] = coef_table["feature"].apply(lambda x: "_".join(x.split("_")[2:])) 
-        coef_table = coef_table[[
-            "clean_feature_name",
-            "coef",
-            "abs_coef",
-            "type"
-        ]]
-        
+                n_pcs = pca_branch.named_steps["pca"].n_components_
+                pc_names = np.array([f"pc_{i + 1}" for i in range(n_pcs)])
+                group_names = group_branch.get_feature_names_out()
+                feature_names = np.concatenate([pc_names, group_names])
+            else:
+                feature_names = np.array([f"pc_{i + 1}" for i in range(len(coefs))])
+
+            coef_table = (
+                pd.DataFrame({
+                    "feature": feature_names,
+                    "coef": coefs,
+                    "abs_coef": np.abs(coefs)
+                })
+                .sort_values("abs_coef", ascending=False)
+            )
+            coef_table["type"] = coef_table["feature"].apply(
+                lambda x: "pc" if str(x).startswith("pc_")
+                else (x.split("__", 1)[0] if "__" in str(x) else "unknown")
+            )
+            coef_table["clean_feature_name"] = coef_table["feature"].apply(
+                lambda x: str(x) if str(x).startswith("pc_")
+                else (x.split("__", 1)[1] if "__" in str(x) else str(x))
+            )
+        else:
+            if using_split_pca and back_project_pca:
+                pre_split = self.pipe_enet.named_steps["pre_split"]
+                pca_branch = dict(pre_split.transformer_list)["pca_features"]
+                group_branch = dict(pre_split.transformer_list)["group_dummies"]
+
+                pca = pca_branch.named_steps["pca"]
+                pre_no_group = pca_branch.named_steps["pre_no_group"]
+                base_feature_names = pre_no_group.get_feature_names_out()
+                group_feature_names = group_branch.get_feature_names_out()
+
+                n_pcs = pca.n_components_
+                beta_pc = coefs[:n_pcs]
+                beta_group = coefs[n_pcs:]
+                beta_base = pca.components_.T @ beta_pc
+
+                feature_names = np.concatenate([base_feature_names, group_feature_names])
+                coefs = np.concatenate([beta_base, beta_group])
+            else:
+                feature_names = self.pipe_enet.named_steps["pre"].get_feature_names_out()
+                if using_pca and back_project_pca:
+                    pca = self.pipe_enet.named_steps["pca"]
+                    coefs = pca.components_.T @ coefs
+
+            if len(feature_names) != len(coefs):
+                raise RuntimeError(
+                    f"Mismatch between feature names ({len(feature_names)}) "
+                    f"and ElasticNet coefficients ({len(coefs)})."
+                )
+
+            coef_table = (
+                pd.DataFrame({
+                    "feature": feature_names,
+                    "coef": coefs,
+                    "abs_coef": np.abs(coefs)
+                })
+                .sort_values("abs_coef", ascending=False)
+            )
+            coef_table["type"] = coef_table["feature"].apply(
+                lambda x: x.split("__", 1)[0] if "__" in x else "unknown"
+            )
+            coef_table["clean_feature_name"] = coef_table["feature"].apply(
+                lambda x: x.split("__", 1)[1] if "__" in x else x
+            )
+
+        if only_group_dummies:
+            coef_table = coef_table[
+                (coef_table["type"] == "cat")
+                & (coef_table["clean_feature_name"].str.startswith(f"{self.group_col}_"))
+            ].copy()
+
+        coef_table = coef_table[["clean_feature_name", "coef", "abs_coef", "type"]]
         return coef_table
     
 
