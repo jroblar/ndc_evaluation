@@ -175,3 +175,4 @@ cython_debug/
 # Ignore large files
 data/processed_data/IEA_scored_policies.csv
 ml_scripts/output/ensemble
+ml_scripts/img/
