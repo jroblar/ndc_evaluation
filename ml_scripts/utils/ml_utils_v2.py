@@ -98,16 +98,22 @@ class RegressionAnalysis:
             max_iter=10000,
             random_state=42,
         )
+        self.enet_params = self._configure_enet_cv(self.enet_params)
 
         # --- Split train / test by time ---
         cutoff = self.df[self.year_col].max() - self.holdout_years
         train_mask = self.df[self.year_col] <= cutoff
 
-        self.X_train = self.df.loc[train_mask]
-        self.X_test  = self.df.loc[~train_mask]
-        self.y_train = self.df.loc[train_mask, self.target_col]
-        self.y_test  = self.df.loc[~train_mask, self.target_col]
-        self.groups_train = self.df.loc[train_mask, self.group_col]
+        # Keep temporal order explicit so time-based CV splitters are leak-safe.
+        sort_cols = [self.year_col, self.group_col]
+        train_df = self.df.loc[train_mask].sort_values(sort_cols).copy()
+        test_df = self.df.loc[~train_mask].sort_values(sort_cols).copy()
+
+        self.X_train = train_df
+        self.X_test = test_df
+        self.y_train = train_df[self.target_col]
+        self.y_test = test_df[self.target_col]
+        self.groups_train = train_df[self.group_col]
 
         # --- Build pipelines ---
         self._build_pipelines()
@@ -123,6 +129,20 @@ class RegressionAnalysis:
         if self.scaler_type == "minmax":
             return MinMaxScaler()
         raise ValueError(f"Unknown scaler_type={self.scaler_type}")
+
+    def _configure_enet_cv(self, enet_params: dict) -> dict:
+        """
+        Ensure ElasticNetCV uses time-aware inner CV to avoid temporal leakage.
+        """
+        params = enet_params.copy()
+        cv_value = params.get("cv", 5)
+
+        if isinstance(cv_value, int):
+            if cv_value < 2:
+                raise ValueError("ElasticNetCV cv must be >= 2 when provided as an int.")
+            params["cv"] = TimeSeriesSplit(n_splits=cv_value)
+
+        return params
 
     def _make_preprocessor(self, include_group: bool, features: Optional[list] = None):
         feats = self.feature_cols.copy() if features is None else features.copy()
@@ -269,8 +289,14 @@ class RegressionAnalysis:
         print(f"{'Model':<15} {'Time MAE':>12} {'Group MAE':>12}")
 
         for name, pipe, allow_group_cv in models:
+            pipe_for_cv = pipe
+            if name == "ElasticNet":
+                # Avoid nested parallelism: outer CV is parallelized by cross_val_score.
+                pipe_for_cv = clone(pipe)
+                pipe_for_cv.set_params(enet__n_jobs=1)
+
             time_mae = -cross_val_score(
-                pipe,
+                pipe_for_cv,
                 self.X_train,
                 self.y_train,
                 cv=tscv,
@@ -280,7 +306,7 @@ class RegressionAnalysis:
 
             if allow_group_cv:
                 group_mae = -cross_val_score(
-                    pipe,
+                    pipe_for_cv,
                     self.X_train,
                     self.y_train,
                     groups=self.groups_train,
