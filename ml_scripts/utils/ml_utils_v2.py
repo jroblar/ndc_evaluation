@@ -520,6 +520,81 @@ class RegressionAnalysis:
                 "model must be one of: "
                 "['RandomForest', 'XGBoost', 'ElasticNet', 'Median']"
             )
+
+    def get_model_hyperparameters(
+        self,
+        model: Optional[str] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Return hyperparameters used by fitted model(s).
+
+        Parameters
+        ----------
+        model : str or None, default=None
+            If provided, return only that model ('RandomForest', 'XGBoost',
+            'ElasticNet', or 'Median'). If None, return all.
+
+        Returns
+        -------
+        dict
+            Mapping from model name to:
+            - 'is_fitted': bool
+            - 'hyperparameters': estimator.get_params(deep=False)
+            - model-specific fitted selections when available
+        """
+        model_to_estimator_step = {
+            "elasticnet": "enet",
+            "randomforest": "rf",
+            "xgboost": "xgb",
+            "median": "median",
+        }
+        canonical_names = {
+            "elasticnet": "ElasticNet",
+            "randomforest": "RandomForest",
+            "xgboost": "XGBoost",
+            "median": "Median",
+        }
+
+        selected_models = (
+            [model.strip().lower()] if model is not None else list(model_to_estimator_step)
+        )
+
+        output: Dict[str, Dict[str, Any]] = {}
+        for model_key in selected_models:
+            if model_key not in model_to_estimator_step:
+                raise ValueError(
+                    "model must be one of: "
+                    "['RandomForest', 'XGBoost', 'ElasticNet', 'Median']"
+                )
+
+            pipe = self._get_pipe_by_name(model_key)
+            est_step = model_to_estimator_step[model_key]
+            estimator = pipe.named_steps[est_step]
+
+            is_fitted = (
+                hasattr(estimator, "n_features_in_")
+                or hasattr(estimator, "coef_")
+                or hasattr(estimator, "feature_importances_")
+                or hasattr(estimator, "constant_")
+                or hasattr(estimator, "alpha_")
+            )
+
+            model_info: Dict[str, Any] = {
+                "is_fitted": is_fitted,
+                "hyperparameters": estimator.get_params(deep=False),
+            }
+
+            if model_key == "elasticnet" and is_fitted:
+                if hasattr(estimator, "alpha_"):
+                    model_info["selected_alpha"] = float(estimator.alpha_)
+                if hasattr(estimator, "l1_ratio_"):
+                    model_info["selected_l1_ratio"] = float(estimator.l1_ratio_)
+                if hasattr(estimator, "n_iter_"):
+                    model_info["n_iter"] = estimator.n_iter_
+
+            output[canonical_names[model_key]] = model_info
+
+        return output
     
     def _make_estimator(self, model: str):
         model = model.strip().lower()
