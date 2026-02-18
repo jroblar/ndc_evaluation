@@ -717,6 +717,63 @@ class RegressionAnalysis:
         plt.gca().invert_yaxis()
         plt.tight_layout()
         plt.show()
+    
+    def get_enet_coef_table(
+        self,
+    ):
+
+        feature_names = self.pipe_enet[:-1].get_feature_names_out()
+
+        coefs = self.pipe_enet.named_steps["enet"].coef_
+
+        coef_table = (
+            pd.DataFrame({
+                "feature": feature_names,
+                "coef": coefs,
+                "abs_coef": abs(coefs)
+            })
+            .sort_values("abs_coef", ascending=False)
+        ) 
+
+        coef_table["type"] = coef_table["feature"].apply(lambda x: x.split("_")[0])
+        coef_table["clean_feature_name"] = coef_table["feature"].apply(lambda x: "_".join(x.split("_")[2:])) 
+        coef_table = coef_table[[
+            "clean_feature_name",
+            "coef",
+            "abs_coef",
+            "type"
+        ]]
+        
+        return coef_table
+    
+
+    def plot_top_enet_regressors(self, n=20, figsize=(8, 8)):
+
+        # Get coef table
+        coef_table = self.get_enet_coef_table()    
+        
+        # Filter to only numeric cols
+        coef_table_only_num = coef_table[coef_table.type=="num"]
+
+        
+        top_n = (
+            coef_table_only_num
+            .sort_values("abs_coef", ascending=True)
+            .tail(n)   # keep only n most important
+        )
+
+        plt.figure(figsize=figsize)
+
+        plt.barh(
+            top_n["clean_feature_name"],
+            top_n["abs_coef"]
+        )
+
+        plt.xlabel("Absolute Regression Coefficient")
+        plt.ylabel("Feature")
+
+        plt.tight_layout()
+        plt.show()
 
 
 class FeaturePredictiveEvaluator:
@@ -1321,11 +1378,11 @@ class EnsembleProjections:
         X = df[feature_cols]
 
         # 3) Run through the pipeline/model
-        df["log_total_emissions"] = model.predict(X)
+        df["x_log_signed_con_edgar_ghg_mt"] = model.predict(X)
 
         # 4) Optional back‐transform
         if exponentiate:
-            df["total_emissions"] = np.exp(df["log_total_emissions"])
+            df["con_edgar_ghg_mt"] = np.exp(df["x_log_signed_con_edgar_ghg_mt"])
 
         return df
     
