@@ -21,6 +21,7 @@ from typing import Dict, List, Tuple, Optional
 import numpy as np
 import pandas as pd
 import joblib
+import yaml
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -40,15 +41,7 @@ warnings.filterwarnings(
     module=r"sklearn",
 )
 
-# ----------------------------
-# Variable lists (ARIMA only)
-# ----------------------------
-ARIMA_VARS = [
-    "log_gdp_2021_ppp_intl_usd",
-    "log_pop_total",
-    "log_energy_use_kg_of_oil_equivalent_per_capita",
-    "log_gdp_per_capita_2021_ppp_intl_usd",
-]
+
 
 SUPPORTED_RULE_CATEGORIES = {
     "unconstrained",
@@ -469,7 +462,20 @@ def generate_ensemble(
     By default, future years begin at last_observed_year + 1 (per country).
     Output includes last observed year row per scenario if config.include_last_observed_row=True.
     """
-    arima_vars = arima_vars or ARIMA_VARS
+    if arima_vars is None:
+        arima_vars = [
+            c for c in df.columns
+            if c not in {"iso_alpha_3", "year", "future_id"}
+        ]
+    else:
+        arima_vars = list(arima_vars)
+
+    if not arima_vars:
+        raise ValueError(
+            "No variables selected for projection. "
+            "Pass arima_vars explicitly or include feature columns in df."
+        )
+
     rulebook = load_projection_rules(config.projection_rules_path) if config.projection_rules_path else None
 
     required = {"iso_alpha_3", "year", *arima_vars}
@@ -533,17 +539,31 @@ if __name__ == "__main__":
     OUTPUT_DIR_PATH = os.path.join(SCRIPT_DIR_PATH, "output")
     ENSEMBLE_DIR_PATH = os.path.join(OUTPUT_DIR_PATH, "ensemble")
     TRAINING_DIR_PATH = os.path.join(OUTPUT_DIR_PATH, "training")
+    CONFIG_DIR_PATH = os.path.join(SCRIPT_DIR_PATH, "config")
 
     os.makedirs(ENSEMBLE_DIR_PATH, exist_ok=True)
 
+    # Obtain file names
+    with open(os.path.join(CONFIG_DIR_PATH, "arima_projections_config.yaml")) as stream:
+        try:
+            arima_config = yaml.safe_load(stream)
+        except yaml.YAMLError as exc:
+            print(exc)
+        
+    # File names
+    data_to_project = arima_config["data_to_project"]
+    variable_projections_rules_file = arima_config["variable_projections_rules_file"] 
+    run_id = arima_config["run_id"]
+    n_scenarios = arima_config["n_scenarios"]
+    end_year = arima_config["end_year"]
+    
+    
     training_df_log_transformed = pd.read_csv(
-        os.path.join(TRAINING_DIR_PATH, "training_df_top_preds.csv")
+        os.path.join(TRAINING_DIR_PATH, data_to_project)
     )
 
-    n_scenarios = 1000
-
     cfg = EnsembleConfig(
-        end_year=2030,
+        end_year=end_year,
         n_scenarios=n_scenarios,
         arima_order=(1, 1, 1),
         auto_tune_arima=True,
@@ -552,10 +572,10 @@ if __name__ == "__main__":
         max_q=3,
         random_state=42,
         include_last_observed_row=True,  # includes last observed year per scenario
-        projection_rules_path=os.path.join(SCRIPT_DIR_PATH, "config", "variable_projection_rules.json"),
+        projection_rules_path=os.path.join(CONFIG_DIR_PATH, variable_projections_rules_file),
     )
 
-    out_path = os.path.join(ENSEMBLE_DIR_PATH, f"ensemble_arima_{n_scenarios}.parquet")
+    out_path = os.path.join(ENSEMBLE_DIR_PATH, f"ensemble_arima_{run_id}.parquet")
 
     generate_ensemble(
         df=training_df_log_transformed,
@@ -567,5 +587,6 @@ if __name__ == "__main__":
     ensemble_df = pd.read_parquet(out_path)
     print("Shape:", ensemble_df.shape)
     print(ensemble_df.head(10))
-
     print(f"Execution time: {time.time() - start_time:.2f} seconds")
+    print("------- Config ------")
+    print(arima_config)
