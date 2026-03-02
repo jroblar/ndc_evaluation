@@ -1642,6 +1642,8 @@ class EnsembleProjections:
                 .sort_values(["future_id", "year"])
             )
 
+            # print(ens["iso_alpha_3"].unique())
+
             # --- Plot ensemble members ---
             for _, grp in ens.groupby("future_id"):
                 ax.plot(
