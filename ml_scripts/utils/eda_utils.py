@@ -284,7 +284,7 @@ class EDAUtils:
         missing = oecd_set - input_set
         return missing
     @staticmethod
-    def plot_column_distributions(df, columns, bins=30):
+    def plot_column_distributions(df, columns, bins=30, kde=True):
         """
         Plots histograms for the specified columns in the DataFrame.
 
@@ -304,7 +304,7 @@ class EDAUtils:
 
         for i, col in enumerate(columns):
             if col in df.columns:
-                sns.histplot(df[col].dropna(), bins=bins, kde=True, ax=axes[i])
+                sns.histplot(df[col].dropna(), bins=bins, kde=kde, ax=axes[i])
                 axes[i].set_title(f"Distribution of {col}")
                 axes[i].set_xlabel(col)
                 axes[i].set_ylabel("Frequency")
