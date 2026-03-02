@@ -15,6 +15,7 @@ import os
 import json
 import time
 import warnings
+import hashlib
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
@@ -91,6 +92,16 @@ def _signed_expm1(z: pd.Series) -> pd.Series:
     # keep expm1 stable for extreme values
     z = z.clip(lower=-700.0, upper=700.0)
     return np.sign(z) * np.expm1(np.abs(z))
+
+
+def _stable_unit_interval(*parts: object) -> float:
+    """
+    Deterministic pseudo-random number in [0, 1) derived from input parts.
+    """
+    key = "|".join(str(p) for p in parts).encode("utf-8")
+    digest = hashlib.sha256(key).digest()
+    as_int = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    return as_int / float(2**64)
 
 
 def load_projection_rules(rule_path: str) -> Dict[str, object]:
@@ -212,6 +223,8 @@ def _apply_projection_rules(
     out = out.copy()
 
     monotonic_vars: List[str] = []
+    binary_vars: List[str] = []
+    binary_latent: Dict[str, pd.Series] = {}
     for var in arima_vars:
         if var not in out.columns:
             continue
@@ -224,6 +237,10 @@ def _apply_projection_rules(
         if category == "log_unbounded":
             values = values.clip(lower=-50.0, upper=60.0)
         elif category == "binary":
+            # Keep latent values for controlled one-time switching logic below.
+            values = values.clip(lower=0.0, upper=1.0)
+            binary_vars.append(var)
+            binary_latent[var] = values.astype(float)
             values = np.rint(values).clip(lower=0.0, upper=1.0)
         elif category == "count":
             values = np.rint(values).clip(lower=0.0)
@@ -251,12 +268,64 @@ def _apply_projection_rules(
 
         out[var] = _signed_log1p(values).astype(float) if is_signed_log else values.astype(float)
 
-    if monotonic_vars:
+    if binary_vars or monotonic_vars:
         out["_row_order"] = np.arange(len(out))
         out = out.sort_values(["iso_alpha_3", "future_id", "year"]).reset_index(drop=True)
+
+    if binary_vars:
+        group_keys = out[["iso_alpha_3", "future_id"]].drop_duplicates()
+        for var in binary_vars:
+            latent_sorted = pd.to_numeric(binary_latent[var], errors="coerce").reset_index(drop=True)
+            out[var] = pd.to_numeric(out[var], errors="coerce").fillna(0.0).clip(lower=0.0, upper=1.0)
+
+            for _, key_row in group_keys.iterrows():
+                iso = key_row["iso_alpha_3"]
+                fid = key_row["future_id"]
+                idx = out.index[(out["iso_alpha_3"] == iso) & (out["future_id"] == fid)].to_numpy()
+                if len(idx) <= 1:
+                    continue
+
+                path = out.loc[idx, var].to_numpy(dtype=float)
+                latent = latent_sorted.iloc[idx].to_numpy(dtype=float)
+
+                # Treat first row as anchor state; future can switch at most once and then persist.
+                start_state = int(np.rint(path[0]))
+                future_latent = latent[1:]
+                n_future = len(future_latent)
+                if n_future == 0:
+                    continue
+
+                if start_state == 0:
+                    crossing = np.where(future_latent >= 0.65)[0]
+                    drift = max(float(np.nanmean(future_latent) - 0.5), 0.0)
+                else:
+                    crossing = np.where(future_latent <= 0.35)[0]
+                    drift = max(float(0.5 - np.nanmean(future_latent)), 0.0)
+
+                switch_prob = min(0.45, 0.02 + 0.90 * drift)
+                u_switch = _stable_unit_interval(iso, fid, var, "switch")
+                should_switch = (len(crossing) > 0) or (u_switch < switch_prob)
+
+                if not should_switch:
+                    path[1:] = start_state
+                else:
+                    if len(crossing) > 0:
+                        switch_at = int(crossing[0]) + 1
+                    else:
+                        u_year = _stable_unit_interval(iso, fid, var, "switch_year")
+                        switch_at = int(np.floor(u_year * n_future)) + 1
+                    switch_state = 1 - start_state
+                    path[1:switch_at] = start_state
+                    path[switch_at:] = switch_state
+
+                out.loc[idx, var] = path
+
+    if monotonic_vars:
         g = out.groupby(["iso_alpha_3", "future_id"], sort=False)
         for var in monotonic_vars:
             out[var] = g[var].cummax()
+
+    if binary_vars or monotonic_vars:
         out = out.sort_values("_row_order").drop(columns="_row_order").reset_index(drop=True)
 
     return out

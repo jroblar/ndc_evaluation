@@ -1,0 +1,5 @@
+data_to_project: "training_df_1771445441.csv"
+variable_projections_rules_file: "variable_projection_rules.json"
+run_id: 1771445441
+n_scenarios: 1000
+end_year: 2030
