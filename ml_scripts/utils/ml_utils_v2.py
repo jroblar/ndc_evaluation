@@ -1719,14 +1719,14 @@ class EnsembleProjections:
         feature_cols : List[str]
             Column names to use as predictors (in the order the model expects).
         exponentiate : bool, default=True
-            If True, creates a 'total_emissions' column = exp(log_total_emissions).
+            If True, creates a 'total_emissions' column = expm1(log_total_emissions).
 
         Returns
         -------
         pd.DataFrame
             A copy of `ensemble_df` with two new columns:
             - 'log_total_emissions': the raw model predictions
-            - 'total_emissions'     : exp(log_total_emissions) if exponentiate=True
+            - 'total_emissions'     : expm1(log_total_emissions) if exponentiate=True
         """
         # 1) Work on a copy
         df = ensemble_df.copy()
@@ -1739,7 +1739,7 @@ class EnsembleProjections:
 
         # 4) Optional back‐transform
         if exponentiate:
-            df["con_edgar_ghg_mt"] = np.exp(df["x_log_signed_con_edgar_ghg_mt"])
+            df["con_edgar_ghg_mt"] = np.expm1(df["x_log_signed_con_edgar_ghg_mt"])
 
         return df
     
