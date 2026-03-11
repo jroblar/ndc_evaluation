@@ -1,34 +1,43 @@
-data_to_project: "training_df_1773099288.csv"
-variable_projections_rules_file: "variable_projection_rules.json"
-run_id: 1773099288
-n_scenarios: 100
+---
+data_to_project: training_df_1773188058.csv
+variable_projections_rules_file: variable_projection_rules.json
+run_id: 1773188058
+n_scenarios: 1000
 end_year: 2030
 constant_feature_years:
   emissions_anchor_2022: 2022
 deterministic_year_features:
   years_since_2022: 2022
 derived_multiplicative_features:
-  trend_year_interaction: ["em_trend_5y", "years_since_2022"]
+  trend_year_interaction:
+  - em_trend_5y
+  - years_since_2022
 lag_features:
-  em_lag_1y: "x_log_signed_con_edgar_ghg_mt"
+  em_lag_1y: x_log_signed_con_edgar_ghg_mt
 rolling_slope_features:
   em_trend_3y:
-    source_col: "x_log_signed_con_edgar_ghg_mt"
+    source_col: x_log_signed_con_edgar_ghg_mt
     window: 3
     min_periods: 2
     shift: 1
   em_trend_5y:
-    source_col: "x_log_signed_con_edgar_ghg_mt"
+    source_col: x_log_signed_con_edgar_ghg_mt
     window: 5
     min_periods: 3
     shift: 1
 rolling_std_features:
   em_volatility_5y:
-    source_col: "x_log_signed_con_edgar_ghg_mt"
+    source_col: x_log_signed_con_edgar_ghg_mt
     window: 5
     min_periods: 3
     shift: 1
 difference_features:
-  em_acceleration: ["em_trend_3y", "em_trend_5y"]
+  em_acceleration:
+  - em_trend_3y
+  - em_trend_5y
 feature_innovation_scale:
-  em_trend_5y: 0.25
+  em_trend_3y: 0.1
+  em_trend_5y: 0.1
+  em_volatility_5y: 0.1
+  em_acceleration: 0.1
+  em_lag_1y: 0.1

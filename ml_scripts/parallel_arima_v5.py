@@ -479,8 +479,50 @@ class EnsembleConfig:
     #                "anchor_col":"emissions_anchor_2022","trend_col":"em_trend_5y",
     #                "years_since_col":"years_since_2022","blend":0.8}}
     lag_features: Dict[str, object] = field(default_factory=dict)
+    # Rolling slope features.
+    # Example:
+    # {"em_trend_3y": {"source_col":"x_log_signed_con_edgar_ghg_mt","window":3,"min_periods":2,"shift":1}}
+    rolling_slope_features: Dict[str, object] = field(default_factory=dict)
+    # Rolling std features.
+    # Example:
+    # {"em_volatility_5y": {"source_col":"x_log_signed_con_edgar_ghg_mt","window":5,"min_periods":3,"shift":1}}
+    rolling_std_features: Dict[str, object] = field(default_factory=dict)
+    # Derived difference features.
+    # Example: {"em_acceleration": ["em_trend_3y", "em_trend_5y"]}
+    difference_features: Dict[str, List[str]] = field(default_factory=dict)
     # Per-feature spread scaling around last observed level (1.0=no change, <1 tighter, >1 wider)
     feature_innovation_scale: Dict[str, float] = field(default_factory=dict)
+
+
+def _collect_non_simulated_feature_names(config: EnsembleConfig) -> set:
+    return (
+        set((config.constant_feature_years or {}).keys())
+        | set((config.deterministic_year_features or {}).keys())
+        | set((config.derived_multiplicative_features or {}).keys())
+        | set((config.lag_features or {}).keys())
+        | set((config.rolling_slope_features or {}).keys())
+        | set((config.rolling_std_features or {}).keys())
+        | set((config.difference_features or {}).keys())
+    )
+
+
+def _compute_slope_raw(values: np.ndarray) -> float:
+    y = np.asarray(values, dtype=float)
+    mask = np.isfinite(y)
+    if int(mask.sum()) < 2:
+        return np.nan
+    x = np.arange(len(y), dtype=float)[mask]
+    y = y[mask]
+    return float(np.polyfit(x, y, 1)[0])
+
+
+def _apply_feature_scale(series: pd.Series, anchor: float, scale: float) -> pd.Series:
+    if not np.isfinite(anchor):
+        return series
+    if not np.isfinite(scale) or scale == 1.0:
+        return series
+    s = pd.to_numeric(series, errors="coerce").astype(float)
+    return anchor + (s - anchor) * scale
 
 
 def simulate_country_ensemble(
@@ -502,10 +544,23 @@ def simulate_country_ensemble(
     deterministic_year_features = config.deterministic_year_features or {}
     derived_multiplicative_features = config.derived_multiplicative_features or {}
     lag_features = config.lag_features or {}
+    rolling_slope_features = config.rolling_slope_features or {}
+    rolling_std_features = config.rolling_std_features or {}
+    difference_features = config.difference_features or {}
     derived_feature_names = set(derived_multiplicative_features.keys())
     deterministic_feature_names = set(constant_feature_years.keys()) | set(deterministic_year_features.keys())
     lag_feature_names = set(lag_features.keys())
-    non_simulated_vars = deterministic_feature_names | derived_feature_names | lag_feature_names
+    rolling_slope_feature_names = set(rolling_slope_features.keys())
+    rolling_std_feature_names = set(rolling_std_features.keys())
+    difference_feature_names = set(difference_features.keys())
+    non_simulated_vars = (
+        deterministic_feature_names
+        | derived_feature_names
+        | lag_feature_names
+        | rolling_slope_feature_names
+        | rolling_std_feature_names
+        | difference_feature_names
+    )
     simulated_vars = [v for v in arima_vars if v not in non_simulated_vars]
 
     # --- 1) ARIMA vars: simulate LEVELS ---
@@ -586,10 +641,11 @@ def simulate_country_ensemble(
             continue
         out[out_var] = pd.to_numeric(out[left_col], errors="coerce") * pd.to_numeric(out[right_col], errors="coerce")
 
-    # Lag features are computed per trajectory in temporal order.
-    if lag_features:
+    # Lag/rolling features are computed per trajectory in temporal order.
+    if lag_features or rolling_slope_features or rolling_std_features:
         out = out.sort_values(["future_id", "year"]).reset_index(drop=True)
         out_year_int = _as_year_int(out["year"])
+
         for lag_col, lag_spec in lag_features.items():
             if isinstance(lag_spec, str):
                 source_col = lag_spec
@@ -650,6 +706,108 @@ def simulate_country_ensemble(
                         lagged.loc[idx] = float(prev_val)
 
             out[lag_col] = pd.to_numeric(lagged, errors="coerce")
+            hist_lag = pd.to_numeric(dfc[source_col], errors="coerce").shift(1)
+            hist_anchor = _safe_last_valid(hist_lag, default=np.nan)
+            scale = float(config.feature_innovation_scale.get(lag_col, 1.0))
+            out[lag_col] = _apply_feature_scale(out[lag_col], anchor=hist_anchor, scale=scale)
+
+        for out_col, slope_spec in rolling_slope_features.items():
+            if not isinstance(slope_spec, dict):
+                continue
+            source_col = str(slope_spec.get("source_col", "x_log_signed_con_edgar_ghg_mt"))
+            window = int(slope_spec.get("window", 3))
+            min_periods = int(slope_spec.get("min_periods", max(2, window - 1)))
+            shift = int(slope_spec.get("shift", 1))
+            if source_col not in out.columns:
+                continue
+            out[out_col] = np.nan
+
+            hist_source = pd.to_numeric(dfc[source_col], errors="coerce").astype(float)
+            hist_rolled = (
+                hist_source.rolling(window=window, min_periods=min_periods)
+                .apply(_compute_slope_raw, raw=True)
+            )
+            if shift > 0:
+                hist_rolled = hist_rolled.shift(shift)
+            hist_anchor = _safe_last_valid(hist_rolled, default=np.nan)
+
+            for fid, g in out.groupby("future_id", sort=False):
+                idx = g.index
+                source_future = pd.to_numeric(g[source_col], errors="coerce").astype(float).values
+                first_future_year = int(pd.to_numeric(g["year"], errors="coerce").min())
+                hist_prefix = (
+                    pd.to_numeric(
+                        dfc.loc[pd.to_numeric(dfc["year"], errors="coerce") < first_future_year, source_col],
+                        errors="coerce",
+                    )
+                    .astype(float)
+                    .values
+                )
+                combined = np.concatenate([hist_prefix, source_future]) if len(hist_prefix) else source_future
+                rolled_combined = (
+                    pd.Series(combined, dtype=float)
+                    .rolling(window=window, min_periods=min_periods)
+                    .apply(_compute_slope_raw, raw=True)
+                )
+                if shift > 0:
+                    rolled_combined = rolled_combined.shift(shift)
+                out.loc[idx, out_col] = rolled_combined.iloc[-len(idx):].values
+
+            scale = float(config.feature_innovation_scale.get(out_col, 1.0))
+            out[out_col] = _apply_feature_scale(out[out_col], anchor=hist_anchor, scale=scale)
+
+        for out_col, std_spec in rolling_std_features.items():
+            if not isinstance(std_spec, dict):
+                continue
+            source_col = str(std_spec.get("source_col", "x_log_signed_con_edgar_ghg_mt"))
+            window = int(std_spec.get("window", 5))
+            min_periods = int(std_spec.get("min_periods", max(2, window - 2)))
+            shift = int(std_spec.get("shift", 1))
+            if source_col not in out.columns:
+                continue
+            out[out_col] = np.nan
+
+            hist_source = pd.to_numeric(dfc[source_col], errors="coerce").astype(float)
+            hist_rolled = hist_source.rolling(window=window, min_periods=min_periods).std()
+            if shift > 0:
+                hist_rolled = hist_rolled.shift(shift)
+            hist_anchor = _safe_last_valid(hist_rolled, default=np.nan)
+
+            for fid, g in out.groupby("future_id", sort=False):
+                idx = g.index
+                source_future = pd.to_numeric(g[source_col], errors="coerce").astype(float).values
+                first_future_year = int(pd.to_numeric(g["year"], errors="coerce").min())
+                hist_prefix = (
+                    pd.to_numeric(
+                        dfc.loc[pd.to_numeric(dfc["year"], errors="coerce") < first_future_year, source_col],
+                        errors="coerce",
+                    )
+                    .astype(float)
+                    .values
+                )
+                combined = np.concatenate([hist_prefix, source_future]) if len(hist_prefix) else source_future
+                rolled_combined = pd.Series(combined, dtype=float).rolling(window=window, min_periods=min_periods).std()
+                if shift > 0:
+                    rolled_combined = rolled_combined.shift(shift)
+                out.loc[idx, out_col] = rolled_combined.iloc[-len(idx):].values
+
+            scale = float(config.feature_innovation_scale.get(out_col, 1.0))
+            out[out_col] = _apply_feature_scale(out[out_col], anchor=hist_anchor, scale=scale)
+
+    for out_var, inputs in difference_features.items():
+        if not isinstance(inputs, list) or len(inputs) != 2:
+            continue
+        left_col, right_col = inputs
+        if left_col not in out.columns or right_col not in out.columns:
+            continue
+        out[out_var] = pd.to_numeric(out[left_col], errors="coerce") - pd.to_numeric(out[right_col], errors="coerce")
+        scale = float(config.feature_innovation_scale.get(out_var, 1.0))
+        baseline_vals = pd.to_numeric(
+            out.loc[_as_year_int(out["year"]) == int(last_year), out_var],
+            errors="coerce",
+        )
+        baseline_anchor = _safe_last_valid(baseline_vals, default=np.nan)
+        out[out_var] = _apply_feature_scale(out[out_var], anchor=baseline_anchor, scale=scale)
 
     return _apply_projection_rules(out, arima_vars=arima_vars, rulebook=rulebook)
 
@@ -686,6 +844,9 @@ def generate_ensemble(
         + list((config.deterministic_year_features or {}).keys())
         + list((config.derived_multiplicative_features or {}).keys())
         + list((config.lag_features or {}).keys())
+        + list((config.rolling_slope_features or {}).keys())
+        + list((config.rolling_std_features or {}).keys())
+        + list((config.difference_features or {}).keys())
     )
     for c in extra_vars:
         if c not in arima_vars:
@@ -693,7 +854,10 @@ def generate_ensemble(
 
     rulebook = load_projection_rules(config.projection_rules_path) if config.projection_rules_path else None
 
-    required = {"iso_alpha_3", "year", *arima_vars}
+    non_simulated_vars = _collect_non_simulated_feature_names(config)
+    simulated_vars = [v for v in arima_vars if v not in non_simulated_vars]
+
+    required = {"iso_alpha_3", "year", *simulated_vars}
     missing = sorted([c for c in required if c not in df.columns])
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
@@ -759,7 +923,7 @@ if __name__ == "__main__":
     os.makedirs(ENSEMBLE_DIR_PATH, exist_ok=True)
 
     # Obtain file names
-    with open(os.path.join(CONFIG_DIR_PATH, "arima_projections_config.yaml")) as stream:
+    with open(os.path.join(CONFIG_DIR_PATH, "arima_projections_with_lags_config.yaml")) as stream:
         try:
             arima_config = yaml.safe_load(stream)
         except yaml.YAMLError as exc:
@@ -792,6 +956,9 @@ if __name__ == "__main__":
         deterministic_year_features=arima_config.get("deterministic_year_features", {}),
         derived_multiplicative_features=arima_config.get("derived_multiplicative_features", {}),
         lag_features=arima_config.get("lag_features", {}),
+        rolling_slope_features=arima_config.get("rolling_slope_features", {}),
+        rolling_std_features=arima_config.get("rolling_std_features", {}),
+        difference_features=arima_config.get("difference_features", {}),
         feature_innovation_scale=arima_config.get("feature_innovation_scale", {}),
     )
 
