@@ -41,3 +41,9 @@ feature_innovation_scale:
   em_volatility_5y: 0.1
   em_acceleration: 0.1
   em_lag_1y: 0.1
+sarimax_trend: c
+trend_guidance_default_blend: 0.2
+trend_guidance_feature_blend:
+  x_log_signed_con_edgar_ghg_mt: 0.6
+trend_guidance_window: 6
+trend_guidance_slope_clip: 0.4

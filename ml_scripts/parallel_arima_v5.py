@@ -360,6 +360,7 @@ def _fit_and_simulate_arima_levels(
     max_p: int,
     max_d: int,
     max_q: int,
+    sarimax_trend: str,
     min_points_for_tune: int = 20,
 ) -> np.ndarray:
     """
@@ -403,6 +404,7 @@ def _fit_and_simulate_arima_levels(
         model = SARIMAX(
             hist,
             order=order,
+            trend=sarimax_trend,
             enforce_stationarity=False,
             enforce_invertibility=False,
             simple_differencing=True if d > 0 else False,
@@ -420,6 +422,7 @@ def _fit_and_simulate_arima_levels(
             model = SARIMAX(
                 hist,
                 order=(0, 1, 0),
+                trend=sarimax_trend,
                 enforce_stationarity=False,
                 enforce_invertibility=False,
                 simple_differencing=True,
@@ -449,6 +452,29 @@ def _fit_and_simulate_arima_levels(
     sims = np.maximum(sims, -50.0)
 
     return sims
+
+
+def _build_recent_trend_line(
+    hist_levels: pd.Series,
+    horizon: int,
+    window: int,
+    slope_clip: float,
+) -> Optional[np.ndarray]:
+    hist = pd.to_numeric(hist_levels, errors="coerce").dropna().astype(float)
+    if horizon <= 0 or len(hist) < 2:
+        return None
+
+    w = int(max(2, min(window, len(hist))))
+    tail = hist.iloc[-w:]
+    slope = _compute_slope_raw(tail.values)
+    if not np.isfinite(slope):
+        return None
+    if np.isfinite(slope_clip) and slope_clip > 0:
+        slope = float(np.clip(slope, -abs(slope_clip), abs(slope_clip)))
+
+    last = float(hist.iloc[-1])
+    steps = np.arange(1, horizon + 1, dtype=float)
+    return last + slope * steps
 
 
 @dataclass
@@ -492,6 +518,14 @@ class EnsembleConfig:
     difference_features: Dict[str, List[str]] = field(default_factory=dict)
     # Per-feature spread scaling around last observed level (1.0=no change, <1 tighter, >1 wider)
     feature_innovation_scale: Dict[str, float] = field(default_factory=dict)
+    # SARIMAX deterministic trend term: "n", "c", "t", or "ct".
+    sarimax_trend: str = "c"
+    # Blend ARIMA paths with recent linear trend to reduce flattening.
+    # blend=0 keeps pure ARIMA; blend=1 fully follows recent trend line.
+    trend_guidance_default_blend: float = 0.0
+    trend_guidance_feature_blend: Dict[str, float] = field(default_factory=dict)
+    trend_guidance_window: int = 5
+    trend_guidance_slope_clip: float = 1.0
 
 
 def _collect_non_simulated_feature_names(config: EnsembleConfig) -> set:
@@ -584,7 +618,25 @@ def simulate_country_ensemble(
             max_p=config.max_p,
             max_d=config.max_d,
             max_q=config.max_q,
+            sarimax_trend=config.sarimax_trend,
         )
+
+        blend = float(
+            config.trend_guidance_feature_blend.get(
+                var, config.trend_guidance_default_blend
+            )
+        )
+        blend = float(np.clip(blend, 0.0, 1.0))
+        if blend > 0.0 and len(years_future) > 0:
+            trend_line = _build_recent_trend_line(
+                hist_levels=hist_non_na,
+                horizon=len(years_future),
+                window=int(config.trend_guidance_window),
+                slope_clip=float(config.trend_guidance_slope_clip),
+            )
+            if trend_line is not None:
+                sims = ((1.0 - blend) * sims) + (blend * trend_line.reshape(1, -1))
+
         # Optional per-feature damping to keep trajectories near historical behavior.
         scale = float(config.feature_innovation_scale.get(var, 1.0))
         if np.isfinite(scale) and scale != 1.0:
@@ -960,6 +1012,11 @@ if __name__ == "__main__":
         rolling_std_features=arima_config.get("rolling_std_features", {}),
         difference_features=arima_config.get("difference_features", {}),
         feature_innovation_scale=arima_config.get("feature_innovation_scale", {}),
+        sarimax_trend=arima_config.get("sarimax_trend", "c"),
+        trend_guidance_default_blend=float(arima_config.get("trend_guidance_default_blend", 0.0)),
+        trend_guidance_feature_blend=arima_config.get("trend_guidance_feature_blend", {}),
+        trend_guidance_window=int(arima_config.get("trend_guidance_window", 5)),
+        trend_guidance_slope_clip=float(arima_config.get("trend_guidance_slope_clip", 1.0)),
     )
 
     out_path = os.path.join(ENSEMBLE_DIR_PATH, f"ensemble_arima_{run_id}.parquet")
