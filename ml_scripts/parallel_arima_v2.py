@@ -448,7 +448,7 @@ if __name__ == "__main__":
         os.path.join(TRAINING_DIR_PATH, "training_df_top15_preds.csv")
     )
 
-    n_scenarios = 100
+    n_scenarios = 1000
 
     cfg = EnsembleConfig(
         end_year=2030,

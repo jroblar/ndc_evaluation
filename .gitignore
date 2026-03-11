@@ -175,3 +175,7 @@ cython_debug/
 # Ignore large files
 data/processed_data/IEA_scored_policies.csv
 ml_scripts/output/ensemble
+ml_scripts/img/
+ml_scripts/output/hp_filtered/
+ml_scripts/output/2030_emissions/*.csv
+ml_scripts/docs

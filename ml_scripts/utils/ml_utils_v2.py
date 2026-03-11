@@ -3,15 +3,24 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from typing import List, Any
 
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, OneHotEncoder
+from sklearn.pipeline import Pipeline, FeatureUnion
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, OneHotEncoder, FunctionTransformer
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import ElasticNetCV, LinearRegression
+from sklearn.linear_model import ElasticNetCV, RidgeCV
 from sklearn.dummy import DummyRegressor
 from sklearn.model_selection import GroupKFold, TimeSeriesSplit, GridSearchCV, cross_val_score, train_test_split, RandomizedSearchCV, KFold, cross_validate
-from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
+from sklearn.metrics import mean_absolute_error, r2_score, root_mean_squared_error
 from sklearn.compose import ColumnTransformer
-from xgboost import XGBRegressor
+from sklearn.base import clone
+from sklearn.decomposition import PCA
+from scipy import sparse
+try:
+    import xgboost as xgb
+    from xgboost import XGBRegressor
+    _HAS_XGB = True
+except ImportError:
+    _HAS_XGB = False
+from sklearn.inspection import permutation_importance
 
 from scipy.stats import qmc
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
@@ -43,12 +52,23 @@ class RegressionAnalysis:
         scaler_type: str = "standard",
         xgb_params: dict = None,
         rf_params: dict = None,
+        enet_params: dict = None,
+        include_year: bool = False,
+        include_group_enet: bool = True,
+        use_pca_enet: bool = False,
+        enet_pca_n_components: Optional[int] = None,
+        enet_pca_random_state: int = 42,
     ):
         self.df = df.copy()
         self.target_col = target_col
         self.group_col = group_col
         self.year_col = year_col
         self.feature_cols = feature_cols.copy()
+        self.include_year = include_year
+        self.include_group_enet =include_group_enet
+        self.use_pca_enet = use_pca_enet
+        self.enet_pca_n_components = enet_pca_n_components
+        self.enet_pca_random_state = enet_pca_random_state
 
         self.scaler_type = scaler_type.lower()
         self.holdout_years = holdout_years
@@ -71,15 +91,29 @@ class RegressionAnalysis:
             n_jobs=-1,
         )
 
+        self.enet_params = enet_params or dict(
+            l1_ratio=[0.2, 0.5, 0.8],
+            cv=5,
+            n_jobs=-1,
+            max_iter=10000,
+            random_state=42,
+        )
+        self.enet_params = self._configure_enet_cv(self.enet_params)
+
         # --- Split train / test by time ---
         cutoff = self.df[self.year_col].max() - self.holdout_years
         train_mask = self.df[self.year_col] <= cutoff
 
-        self.X_train = self.df.loc[train_mask]
-        self.X_test  = self.df.loc[~train_mask]
-        self.y_train = self.df.loc[train_mask, self.target_col]
-        self.y_test  = self.df.loc[~train_mask, self.target_col]
-        self.groups_train = self.df.loc[train_mask, self.group_col]
+        # Keep temporal order explicit so time-based CV splitters are leak-safe.
+        sort_cols = [self.year_col, self.group_col]
+        train_df = self.df.loc[train_mask].sort_values(sort_cols).copy()
+        test_df = self.df.loc[~train_mask].sort_values(sort_cols).copy()
+
+        self.X_train = train_df
+        self.X_test = test_df
+        self.y_train = train_df[self.target_col]
+        self.y_test = test_df[self.target_col]
+        self.groups_train = train_df[self.group_col]
 
         # --- Build pipelines ---
         self._build_pipelines()
@@ -96,8 +130,25 @@ class RegressionAnalysis:
             return MinMaxScaler()
         raise ValueError(f"Unknown scaler_type={self.scaler_type}")
 
-    def _make_preprocessor(self, include_group: bool):
-        feats = self.feature_cols + [self.year_col]
+    def _configure_enet_cv(self, enet_params: dict) -> dict:
+        """
+        Ensure ElasticNetCV uses time-aware inner CV to avoid temporal leakage.
+        """
+        params = enet_params.copy()
+        cv_value = params.get("cv", 5)
+
+        if isinstance(cv_value, int):
+            if cv_value < 2:
+                raise ValueError("ElasticNetCV cv must be >= 2 when provided as an int.")
+            params["cv"] = TimeSeriesSplit(n_splits=cv_value)
+
+        return params
+
+    def _make_preprocessor(self, include_group: bool, features: Optional[list] = None):
+        feats = self.feature_cols.copy() if features is None else features.copy()
+        if self.include_year:
+            feats.append(self.year_col)
+
         if include_group:
             feats = feats + [self.group_col]
 
@@ -117,25 +168,85 @@ class RegressionAnalysis:
                 ]), categorical),
             ]
         )
+    
+    def _to_dense(self, X):
+        if sparse.issparse(X):
+            return X.toarray()
+        return X
+
+    def _make_group_dummy_preprocessor(self):
+        return ColumnTransformer(
+            transformers=[
+                ("cat", Pipeline([
+                    ("imputer", SimpleImputer(strategy="most_frequent")),
+                    ("onehot", OneHotEncoder(drop="first", handle_unknown="ignore")),
+                ]), [self.group_col]),
+            ]
+        )
+
+    def _make_enet_pca_pipeline(
+        self,
+        n_components: Optional[int] = None,
+        random_state: Optional[int] = None,
+        features: Optional[list] = None,
+        include_group: Optional[bool] = None,
+    ):
+        n_components = self.enet_pca_n_components if n_components is None else n_components
+        random_state = self.enet_pca_random_state if random_state is None else random_state
+        include_group = self.include_group_enet if include_group is None else include_group
+
+        # Keep group dummies out of PCA so fixed effects remain explicit regressors.
+        if include_group:
+            pca_branch = Pipeline(
+                [
+                    ("pre_no_group", self._make_preprocessor(include_group=False, features=features)),
+                    ("to_dense", FunctionTransformer(self._to_dense, accept_sparse=True)),
+                    ("pca", PCA(
+                        n_components=n_components,
+                        random_state=random_state,
+                    )),
+                ]
+            )
+            group_branch = self._make_group_dummy_preprocessor()
+            return Pipeline(
+                [
+                    ("pre_split", FeatureUnion([
+                        ("pca_features", pca_branch),
+                        ("group_dummies", group_branch),
+                    ])),
+                    ("to_dense_after_union", FunctionTransformer(self._to_dense, accept_sparse=True)),
+                    ("enet", ElasticNetCV(**self.enet_params)),
+                ]
+            )
+
+        pre = self._make_preprocessor(include_group=False, features=features)
+        return Pipeline(
+            [
+                ("pre", pre),
+                ("to_dense", FunctionTransformer(self._to_dense, accept_sparse=True)),
+                ("pca", PCA(
+                    n_components=n_components,
+                    random_state=random_state,
+                )),
+                ("enet", ElasticNetCV(**self.enet_params)),
+            ]
+        )
 
     # -------------------------
     # Pipelines
     # -------------------------
     def _build_pipelines(self):
         # ElasticNet → ISO fixed effects
-        pre_enet = self._make_preprocessor(include_group=True)
-        self.pipe_enet = Pipeline(
-            [
-                ("pre", pre_enet),
-                ("enet", ElasticNetCV(
-                    l1_ratio=[0.2, 0.5, 0.8],
-                    cv=5,
-                    n_jobs=-1,
-                    max_iter=10000,
-                    random_state=42,
-                )),
-            ]
-        )
+        pre_enet = self._make_preprocessor(include_group=self.include_group_enet)
+        if self.use_pca_enet:
+            self.pipe_enet = self._make_enet_pca_pipeline()
+        else:
+            self.pipe_enet = Pipeline(
+                [
+                    ("pre", pre_enet),
+                    ("enet", ElasticNetCV(**self.enet_params)),
+                ]
+            )
 
         # Random Forest → no ISO
         pre_rf = self._make_preprocessor(include_group=False)
@@ -178,8 +289,14 @@ class RegressionAnalysis:
         print(f"{'Model':<15} {'Time MAE':>12} {'Group MAE':>12}")
 
         for name, pipe, allow_group_cv in models:
+            pipe_for_cv = pipe
+            if name == "ElasticNet":
+                # Avoid nested parallelism: outer CV is parallelized by cross_val_score.
+                pipe_for_cv = clone(pipe)
+                pipe_for_cv.set_params(enet__n_jobs=1)
+
             time_mae = -cross_val_score(
-                pipe,
+                pipe_for_cv,
                 self.X_train,
                 self.y_train,
                 cv=tscv,
@@ -189,7 +306,7 @@ class RegressionAnalysis:
 
             if allow_group_cv:
                 group_mae = -cross_val_score(
-                    pipe,
+                    pipe_for_cv,
                     self.X_train,
                     self.y_train,
                     groups=self.groups_train,
@@ -226,7 +343,7 @@ class RegressionAnalysis:
         """
         RMSE in log space.
         """
-        return np.sqrt(mean_squared_error(y_true_log, y_pred_log))
+        return root_mean_squared_error(y_true_log, y_pred_log)
 
     
     
@@ -430,6 +547,310 @@ class RegressionAnalysis:
                 "['RandomForest', 'XGBoost', 'ElasticNet', 'Median']"
             )
 
+    def get_model_hyperparameters(
+        self,
+        model: Optional[str] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Return hyperparameters used by fitted model(s).
+
+        Parameters
+        ----------
+        model : str or None, default=None
+            If provided, return only that model ('RandomForest', 'XGBoost',
+            'ElasticNet', or 'Median'). If None, return all.
+
+        Returns
+        -------
+        dict
+            Mapping from model name to:
+            - 'is_fitted': bool
+            - 'hyperparameters': estimator.get_params(deep=False)
+            - model-specific fitted selections when available
+        """
+        model_to_estimator_step = {
+            "elasticnet": "enet",
+            "randomforest": "rf",
+            "xgboost": "xgb",
+            "median": "median",
+        }
+        canonical_names = {
+            "elasticnet": "ElasticNet",
+            "randomforest": "RandomForest",
+            "xgboost": "XGBoost",
+            "median": "Median",
+        }
+
+        selected_models = (
+            [model.strip().lower()] if model is not None else list(model_to_estimator_step)
+        )
+
+        output: Dict[str, Dict[str, Any]] = {}
+        for model_key in selected_models:
+            if model_key not in model_to_estimator_step:
+                raise ValueError(
+                    "model must be one of: "
+                    "['RandomForest', 'XGBoost', 'ElasticNet', 'Median']"
+                )
+
+            pipe = self._get_pipe_by_name(model_key)
+            est_step = model_to_estimator_step[model_key]
+            estimator = pipe.named_steps[est_step]
+
+            is_fitted = (
+                hasattr(estimator, "n_features_in_")
+                or hasattr(estimator, "coef_")
+                or hasattr(estimator, "feature_importances_")
+                or hasattr(estimator, "constant_")
+                or hasattr(estimator, "alpha_")
+            )
+
+            model_info: Dict[str, Any] = {
+                "is_fitted": is_fitted,
+                "hyperparameters": estimator.get_params(deep=False),
+            }
+
+            if model_key == "elasticnet" and is_fitted:
+                if hasattr(estimator, "alpha_"):
+                    model_info["selected_alpha"] = float(estimator.alpha_)
+                if hasattr(estimator, "l1_ratio_"):
+                    model_info["selected_l1_ratio"] = float(estimator.l1_ratio_)
+                if hasattr(estimator, "n_iter_"):
+                    model_info["n_iter"] = estimator.n_iter_
+
+            output[canonical_names[model_key]] = model_info
+
+        return output
+    
+    def _make_estimator(self, model: str):
+        model = model.strip().lower()
+        if model == "randomforest":
+            return "rf", RandomForestRegressor(**self.rf_params)
+        if model == "xgboost":
+            if not _HAS_XGB:
+                raise RuntimeError("XGBoost is not available in this environment.")
+            return "xgb", XGBRegressor(**self.xgb_params)
+        if model == "elasticnet":
+            return "enet", ElasticNetCV(**self.enet_params)
+        if model == "median":
+            return "median", DummyRegressor(strategy="median")
+        raise ValueError(
+            "model must be one of: "
+            "['RandomForest', 'XGBoost', 'ElasticNet', 'Median']"
+        )
+    
+    def pca_experiment(
+        self,
+        model: str = "ElasticNet",
+        n_components: Optional[int] = None,
+        plot: bool = True,
+        random_state: int = 42,
+    ) -> pd.DataFrame:
+        """
+        Run PCA ablation: fit with all PCs, then drop one PC at a time
+        starting from the lowest-variance component, and track holdout MAE (level).
+        """
+
+        model_l = model.strip().lower()
+        include_group = self.include_group_enet if model_l == "elasticnet" else False
+        pre_tmp = self._make_preprocessor(
+            include_group=(include_group and model_l != "elasticnet")
+        )
+        if model_l == "elasticnet" and include_group:
+            pre_tmp = self._make_preprocessor(include_group=False)
+
+        X_train_pre = pre_tmp.fit_transform(self.X_train)
+        X_train_pre = self._to_dense(X_train_pre)
+
+        max_components = min(X_train_pre.shape[0], X_train_pre.shape[1])
+        if n_components is None:
+            n_components = max_components
+        else:
+            n_components = int(n_components)
+            n_components = min(n_components, max_components)
+        if n_components < 1:
+            raise ValueError("n_components must be >= 1 after preprocessing.")
+
+        results = []
+        for k in range(n_components, 0, -1):
+            if model_l == "elasticnet":
+                pipe = self._make_enet_pca_pipeline(n_components=k, random_state=random_state)
+            else:
+                pre = self._make_preprocessor(include_group=include_group)
+                est_name, est = self._make_estimator(model)
+                pipe = Pipeline(
+                    [
+                        ("pre", pre),
+                        ("to_dense", FunctionTransformer(self._to_dense, accept_sparse=True)),
+                        ("pca", PCA(n_components=k, random_state=random_state)),
+                        (est_name, est),
+                    ]
+                )
+
+            pipe.fit(self.X_train, self.y_train)
+            preds = pipe.predict(self.X_test)
+            mae_level = self._mae_level_space(self.y_test, preds)
+
+            results.append(
+                {
+                    "n_components": k,
+                    "removed_components": n_components - k,
+                    "test_mae_level": mae_level,
+                }
+            )
+
+        df_res = (
+            pd.DataFrame(results)
+            .sort_values("n_components", ascending=False)
+            .reset_index(drop=True)
+        )
+
+        if plot:
+            plt.figure(figsize=(8, 5))
+            plt.plot(
+                df_res["removed_components"],
+                df_res["test_mae_level"],
+                marker="o",
+            )
+            plt.xlabel("PCs removed (lowest variance first)")
+            plt.ylabel("Holdout MAE (level)")
+            plt.title(f"{model}: PCA ablation on holdout set")
+            plt.tight_layout()
+            plt.show()
+
+        return df_res
+
+    def enet_l1_ratio_experiment(
+        self,
+        l1_ratios: Iterable[float],
+        plot: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Fit ElasticNet across different l1_ratio values and evaluate holdout MAE (level).
+
+        Parameters
+        ----------
+        l1_ratios : iterable of float
+            l1_ratio values to evaluate.
+        plot : bool, default=True
+            If True, plot holdout MAE (level) against l1_ratio.
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns:
+            - l1_ratio
+            - test_mae_level
+            - selected_alpha
+            - n_iter
+        """
+        ratios = [float(v) for v in l1_ratios]
+        if len(ratios) == 0:
+            raise ValueError("l1_ratios must contain at least one value.")
+
+        results = []
+        for ratio in ratios:
+            pipe = clone(self.pipe_enet)
+            pipe.set_params(enet__l1_ratio=ratio)
+            pipe.fit(self.X_train, self.y_train)
+
+            preds = pipe.predict(self.X_test)
+            mae_level = self._mae_level_space(self.y_test, preds)
+
+            enet_est = pipe.named_steps["enet"]
+            results.append(
+                {
+                    "l1_ratio": ratio,
+                    "test_mae_level": mae_level,
+                    "selected_alpha": float(enet_est.alpha_) if hasattr(enet_est, "alpha_") else np.nan,
+                    "n_iter": enet_est.n_iter_ if hasattr(enet_est, "n_iter_") else np.nan,
+                }
+            )
+
+        df_res = pd.DataFrame(results).sort_values("l1_ratio").reset_index(drop=True)
+
+        if plot:
+            plt.figure(figsize=(8, 5))
+            plt.plot(df_res["l1_ratio"], df_res["test_mae_level"], marker="o")
+            plt.xlabel("ElasticNet l1_ratio")
+            plt.ylabel("Holdout MAE (level)")
+            plt.title("ElasticNet l1_ratio sweep on holdout set")
+            plt.tight_layout()
+            plt.show()
+
+        return df_res
+
+    def feature_ablation_experiment(
+        self,
+        model: str = "ElasticNet",
+        plot: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Ablation over numeric feature_cols only:
+        - always keeps country dummies (group_col) in the model
+        - removes one numeric feature at a time
+        - removal order follows feature_cols order from the end to the start
+        - reports holdout MAE in level space
+        """
+        model_l = model.strip().lower()
+        base_features = self.feature_cols.copy()
+        numeric_removal_order = [
+            c for c in base_features if self.df[c].dtype != "object"
+        ][::-1]
+
+        removed = []
+        results = []
+
+        for step in range(len(numeric_removal_order) + 1):
+            current_features = [c for c in base_features if c not in removed]
+
+            if model_l == "elasticnet":
+                pipe = Pipeline(
+                    [
+                        ("pre", self._make_preprocessor(include_group=True, features=current_features)),
+                        ("enet", ElasticNetCV(**self.enet_params)),
+                    ]
+                )
+            elif model_l == "median":
+                pipe = Pipeline([("median", DummyRegressor(strategy="median"))])
+            else:
+                est_name, est = self._make_estimator(model)
+                pipe = Pipeline(
+                    [
+                        ("pre", self._make_preprocessor(include_group=True, features=current_features)),
+                        (est_name, est),
+                    ]
+                )
+
+            pipe.fit(self.X_train, self.y_train)
+            preds = pipe.predict(self.X_test)
+            mae_level = self._mae_level_space(self.y_test, preds)
+
+            results.append(
+                {
+                    "removed_feature": removed[-1] if removed else None,
+                    "n_removed": len(removed),
+                    "n_features_remaining": len(current_features),
+                    "test_mae_level": mae_level,
+                }
+            )
+
+            if step < len(numeric_removal_order):
+                removed.append(numeric_removal_order[step])
+
+        df_res = pd.DataFrame(results)
+
+        if plot:
+            plt.figure(figsize=(8, 5))
+            plt.plot(df_res["n_removed"], df_res["test_mae_level"], marker="o")
+            plt.xlabel("Numeric features removed (last to first in feature_cols)")
+            plt.ylabel("Holdout MAE (level)")
+            plt.title(f"{model}: Numeric feature ablation with country dummies retained")
+            plt.tight_layout()
+            plt.show()
+
+        return df_res
+
         
     def per_country_errors(
         self,
@@ -583,13 +1004,399 @@ class RegressionAnalysis:
         plt.gca().invert_yaxis()
         plt.tight_layout()
         plt.show()
+    
+    def get_enet_coef_table(
+        self,
+        back_project_pca: bool = False,
+        only_group_dummies: bool = False,
+    ):
+        coefs = self.pipe_enet.named_steps["enet"].coef_
+        using_pca = self.use_pca_enet and (
+            "pca" in self.pipe_enet.named_steps or "pre_split" in self.pipe_enet.named_steps
+        )
+        using_split_pca = using_pca and "pre_split" in self.pipe_enet.named_steps
+
+        # With PCA enabled, ElasticNet coefficients are on principal components.
+        # Optionally back-project to the preprocessed feature space.
+        if using_pca and not back_project_pca:
+            if using_split_pca:
+                pre_split = self.pipe_enet.named_steps["pre_split"]
+                pca_branch = dict(pre_split.transformer_list)["pca_features"]
+                group_branch = dict(pre_split.transformer_list)["group_dummies"]
+
+                n_pcs = pca_branch.named_steps["pca"].n_components_
+                pc_names = np.array([f"pc_{i + 1}" for i in range(n_pcs)])
+                group_names = group_branch.get_feature_names_out()
+                feature_names = np.concatenate([pc_names, group_names])
+            else:
+                feature_names = np.array([f"pc_{i + 1}" for i in range(len(coefs))])
+
+            coef_table = (
+                pd.DataFrame({
+                    "feature": feature_names,
+                    "coef": coefs,
+                    "abs_coef": np.abs(coefs)
+                })
+                .sort_values("abs_coef", ascending=False)
+            )
+            coef_table["type"] = coef_table["feature"].apply(
+                lambda x: "pc" if str(x).startswith("pc_")
+                else (x.split("__", 1)[0] if "__" in str(x) else "unknown")
+            )
+            coef_table["clean_feature_name"] = coef_table["feature"].apply(
+                lambda x: str(x) if str(x).startswith("pc_")
+                else (x.split("__", 1)[1] if "__" in str(x) else str(x))
+            )
+        else:
+            if using_split_pca and back_project_pca:
+                pre_split = self.pipe_enet.named_steps["pre_split"]
+                pca_branch = dict(pre_split.transformer_list)["pca_features"]
+                group_branch = dict(pre_split.transformer_list)["group_dummies"]
+
+                pca = pca_branch.named_steps["pca"]
+                pre_no_group = pca_branch.named_steps["pre_no_group"]
+                base_feature_names = pre_no_group.get_feature_names_out()
+                group_feature_names = group_branch.get_feature_names_out()
+
+                n_pcs = pca.n_components_
+                beta_pc = coefs[:n_pcs]
+                beta_group = coefs[n_pcs:]
+                beta_base = pca.components_.T @ beta_pc
+
+                feature_names = np.concatenate([base_feature_names, group_feature_names])
+                coefs = np.concatenate([beta_base, beta_group])
+            else:
+                feature_names = self.pipe_enet.named_steps["pre"].get_feature_names_out()
+                if using_pca and back_project_pca:
+                    pca = self.pipe_enet.named_steps["pca"]
+                    coefs = pca.components_.T @ coefs
+
+            if len(feature_names) != len(coefs):
+                raise RuntimeError(
+                    f"Mismatch between feature names ({len(feature_names)}) "
+                    f"and ElasticNet coefficients ({len(coefs)})."
+                )
+
+            coef_table = (
+                pd.DataFrame({
+                    "feature": feature_names,
+                    "coef": coefs,
+                    "abs_coef": np.abs(coefs)
+                })
+                .sort_values("abs_coef", ascending=False)
+            )
+            coef_table["type"] = coef_table["feature"].apply(
+                lambda x: x.split("__", 1)[0] if "__" in x else "unknown"
+            )
+            coef_table["clean_feature_name"] = coef_table["feature"].apply(
+                lambda x: x.split("__", 1)[1] if "__" in x else x
+            )
+
+        if only_group_dummies:
+            coef_table = coef_table[
+                (coef_table["type"] == "cat")
+                & (coef_table["clean_feature_name"].str.startswith(f"{self.group_col}_"))
+            ].copy()
+
+        coef_table = coef_table[["clean_feature_name", "coef", "abs_coef", "type"]]
+        return coef_table
+    
+
+    def plot_top_enet_regressors(self, n=20, figsize=(8, 8)):
+
+        # Get coef table
+        coef_table = self.get_enet_coef_table()    
+        
+        # Filter to only numeric cols
+        coef_table_only_num = coef_table[coef_table.type=="num"]
+
+        
+        top_n = (
+            coef_table_only_num
+            .sort_values("abs_coef", ascending=True)
+            .tail(n)   # keep only n most important
+        )
+
+        plt.figure(figsize=figsize)
+
+        plt.barh(
+            top_n["clean_feature_name"],
+            top_n["abs_coef"]
+        )
+
+        plt.xlabel("Absolute Regression Coefficient")
+        plt.ylabel("Feature")
+
+        plt.tight_layout()
+        plt.show()
 
 
+class FeaturePredictiveEvaluator:
+    """
+    Evaluate the predictive usefulness of a single feature for emissions models.
+    """
 
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        target_col: str = "total_emissions",
+        country_col: str = "iso_alpha_3",
+        year_col: str = "year",
+        group_col: str = "iso_alpha_3",
+        include_year: bool = True,
+        log_target: bool = True,
+        n_splits: int = 5,
+        random_state: int = 0,
+        scaler_type: str = "standard",
+    ):
+        self.df = df.copy()
+        self.target_col = target_col
+        self.country_col = country_col
+        self.year_col = year_col
+        self.group_col = group_col
+        self.log_target = log_target
+        self.n_splits = n_splits
+        self.random_state = random_state
+        self.include_year = include_year
+        self.scaler_type = scaler_type.lower()
 
+        self._prepare_target()
+        self._prepare_baseline()
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
+    def _prepare_target(self):
+        y = self.df[self.target_col].values
+        if self.log_target:
+            y = np.log(y)
+        self.y = y
 
+    def _prepare_baseline(self):
+        self.baseline_cols = [self.country_col]
+        if self.include_year:
+            self.baseline_cols.append(self.year_col)
+
+        self.X_base = self.df[self.baseline_cols].copy()
+        self.groups = self.df[self.group_col]
+        self.cv = GroupKFold(n_splits=self.n_splits)
+
+    def _get_scaler(self):
+        if self.scaler_type == "standard":
+            return StandardScaler()
+        if self.scaler_type == "robust":
+            return RobustScaler()
+        if self.scaler_type == "minmax":
+            return MinMaxScaler()
+        raise ValueError(f"Unknown scaler_type={self.scaler_type}")
+
+    def _make_preprocessor(self, features: list[str]) -> ColumnTransformer:
+        categorical = [c for c in features if self.df[c].dtype == "object"]
+        numeric = [c for c in features if c not in categorical]
+
+        return ColumnTransformer(
+            transformers=[
+                ("num", Pipeline([
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("scaler", self._get_scaler()),
+                ]), numeric),
+
+                ("cat", Pipeline([
+                    ("imputer", SimpleImputer(strategy="most_frequent")),
+                    ("onehot", OneHotEncoder(drop="first", handle_unknown="ignore")),
+                ]), categorical),
+            ]
+        )
+
+    def _make_ridge_pipeline(self, features: list[str]) -> Pipeline:
+        pre = self._make_preprocessor(features)
+        ridge = RidgeCV(alphas=np.logspace(-3, 3, 25))
+        return Pipeline([("pre", pre), ("ridge", ridge)])
+
+    def _make_xgb_pipeline(self, features: list[str]) -> Pipeline:
+        pre = self._make_preprocessor(features)
+        xgb_model = XGBRegressor(
+            n_estimators=300,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=self.random_state,
+            n_jobs=-1,
+        )
+        return Pipeline([("pre", pre), ("xgb", xgb_model)])
+
+    def _cv_mae_pipeline(
+        self,
+        pipeline: Pipeline,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        groups: pd.Series,
+    ) -> float:
+        rmses = []
+        for train, test in self.cv.split(X, y, groups):
+            fold_pipe = clone(pipeline)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Found unknown categories in columns",
+                    category=UserWarning,
+                    module=r"sklearn\.preprocessing\._encoders",
+                )
+                fold_pipe.fit(X.iloc[train], y[train])
+                preds = fold_pipe.predict(X.iloc[test])
+            rmses.append(
+                mean_absolute_error(y[test], preds)
+            )
+        return float(np.mean(rmses))
+
+    def _cv_mae_pipeline_level(
+        self,
+        pipeline: Pipeline,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        groups: pd.Series,
+    ) -> float:
+        maes = []
+        for train, test in self.cv.split(X, y, groups):
+            fold_pipe = clone(pipeline)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Found unknown categories in columns",
+                    category=UserWarning,
+                    module=r"sklearn\.preprocessing\._encoders",
+                )
+                fold_pipe.fit(X.iloc[train], y[train])
+                preds = fold_pipe.predict(X.iloc[test])
+            if self.log_target:
+                y_true = np.exp(y[test])
+                y_pred = np.exp(preds)
+            else:
+                y_true = y[test]
+                y_pred = preds
+            maes.append(mean_absolute_error(y_true, y_pred))
+        return float(np.mean(maes))
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def within_group_std(self, feature: str) -> float:
+        return (
+            self.df
+            .groupby(self.group_col)[feature]
+            .std()
+            .median()
+        )
+
+    def evaluate_feature(
+        self,
+        feature: str,
+        ridge_alpha: float = 1.0,
+        test_xgboost: bool = True,
+        n_perm: int = 20,
+    ) -> pd.Series:
+        """
+        Run full predictive diagnostics for a single feature.
+        """
+
+        results = {}
+
+        # 1. Variability check
+        results["median_within_group_std"] = self.within_group_std(feature)
+
+        # 2. Ridge regression RMSE
+        X_feat = pd.concat([self.X_base, self.df[[feature]]], axis=1)
+
+        ridge_base_pipe = self._make_ridge_pipeline(self.baseline_cols)
+        ridge_feat_pipe = self._make_ridge_pipeline(self.baseline_cols + [feature])
+
+        results["mae_base_ridge"] = self._cv_mae_pipeline(
+            ridge_base_pipe, self.X_base, self.y, self.groups
+        )
+        results["mae_with_feature_ridge"] = self._cv_mae_pipeline(
+            ridge_feat_pipe, X_feat, self.y, self.groups
+        )
+        results["mae_delta_ridge"] = (
+            results["mae_with_feature_ridge"]
+            - results["mae_base_ridge"]
+        )
+        results["mae_base_ridge_level"] = self._cv_mae_pipeline_level(
+            ridge_base_pipe, self.X_base, self.y, self.groups
+        )
+        results["mae_with_feature_ridge_level"] = self._cv_mae_pipeline_level(
+            ridge_feat_pipe, X_feat, self.y, self.groups
+        )
+        results["mae_delta_ridge_level"] = (
+            results["mae_with_feature_ridge_level"]
+            - results["mae_base_ridge_level"]
+        )
+
+        # 3. Permutation importance (trained on full sample)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Found unknown categories in columns",
+                category=UserWarning,
+                module=r"sklearn\.preprocessing\._encoders",
+            )
+            ridge_feat_pipe.fit(X_feat, self.y)
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Found unknown categories in columns",
+                category=UserWarning,
+                module=r"sklearn\.preprocessing\._encoders",
+            )
+            perm = permutation_importance(
+                ridge_feat_pipe,
+                X_feat,
+                self.y,
+                n_repeats=n_perm,
+                random_state=self.random_state,
+            )
+
+        results["permutation_importance"] = float(
+            perm.importances_mean[list(X_feat.columns).index(feature)]
+        )
+
+        # 4. Optional nonlinear test
+        if test_xgboost and _HAS_XGB:
+            xgb_base_pipe = self._make_xgb_pipeline(self.baseline_cols)
+            xgb_feat_pipe = self._make_xgb_pipeline(self.baseline_cols + [feature])
+
+            results["mae_base_xgb"] = self._cv_mae_pipeline(
+                xgb_base_pipe, self.X_base, self.y, self.groups
+            )
+            results["mae_with_feature_xgb"] = self._cv_mae_pipeline(
+                xgb_feat_pipe, X_feat, self.y, self.groups
+            )
+            results["mae_delta_xgb"] = (
+                results["mae_with_feature_xgb"]
+                - results["mae_base_xgb"]
+            )
+            results["mae_base_xgb_level"] = self._cv_mae_pipeline_level(
+                xgb_base_pipe, self.X_base, self.y, self.groups
+            )
+            results["mae_with_feature_xgb_level"] = self._cv_mae_pipeline_level(
+                xgb_feat_pipe, X_feat, self.y, self.groups
+            )
+            results["mae_delta_xgb_level"] = (
+                results["mae_with_feature_xgb_level"]
+                - results["mae_base_xgb_level"]
+            )
+        else:
+            results["mae_base_xgb"] = np.nan
+            results["mae_with_feature_xgb"] = np.nan
+            results["mae_delta_xgb"] = np.nan
+            results["mae_base_xgb_level"] = np.nan
+            results["mae_with_feature_xgb_level"] = np.nan
+            results["mae_delta_xgb_level"] = np.nan
+
+        return pd.Series(results)
 
 class EnsembleProjections:
 
@@ -775,6 +1582,124 @@ class EnsembleProjections:
         plt.show()
     
     @staticmethod
+    def plot_ensemble_time_series_grid(
+        df,
+        panels,
+        hist_df=None,
+        ncols=2,
+        figsize=(12, 8),
+        xlabel="Year",
+        save_path=None
+    ):
+        """
+        Multi-panel pony-tail plot for ensemble projections.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Ensemble dataframe with columns:
+            ['iso_alpha_3', 'future_id', 'year', <vars>]
+
+        panels : list of dict
+            Each dict defines one subplot with keys:
+            {
+                "iso": str,
+                "column": str,
+                "title": str (optional),
+                "ylabel": str (optional)
+            }
+
+            Length of panels should be 2 or 4 (or any number).
+
+        hist_df : pd.DataFrame, optional
+            Historical dataframe with same structure as df (no future_id).
+
+        ncols : int
+            Number of columns in subplot grid (default=2).
+
+        figsize : tuple
+            Figure size.
+
+        xlabel : str
+            Shared x-axis label.
+        """
+
+        n_panels = len(panels)
+        nrows = int(np.ceil(n_panels / ncols))
+
+        fig, axes = plt.subplots(nrows, ncols, figsize=figsize, sharex=True)
+        axes = np.atleast_1d(axes).flatten()
+
+        for ax, panel in zip(axes, panels):
+            iso = panel["iso"]
+            col = panel["column"]
+            title = panel.get("title", f"{iso} – {col}")
+            ylabel = panel.get("ylabel", col)
+
+            # --- Subset ensemble ---
+            ens = (
+                df[df["iso_alpha_3"] == iso]
+                .sort_values(["future_id", "year"])
+            )
+
+            # print(ens["iso_alpha_3"].unique())
+
+            # --- Plot ensemble members ---
+            for _, grp in ens.groupby("future_id"):
+                ax.plot(
+                    grp["year"],
+                    grp[col],
+                    color="gray",
+                    linewidth=1,
+                    alpha=0.4
+                )
+
+            # --- Overlay historical series ---
+            if hist_df is not None:
+                hist = (
+                    hist_df[hist_df["iso_alpha_3"] == iso]
+                    .sort_values("year")
+                )
+                if not hist.empty and col in hist.columns:
+                    ax.plot(
+                        hist["year"],
+                        hist[col],
+                        color="black",
+                        linewidth=2.5,
+                        marker="o",
+                        label="Historical"
+                    )
+
+            ax.set_title(title)
+            ax.set_ylabel(ylabel)
+            ax.grid(alpha=0.2)
+
+        # --- Remove unused axes ---
+        for ax in axes[n_panels:]:
+            ax.axis("off")
+
+        # --- Shared labels ---
+        for ax in axes[-ncols:]:
+            ax.set_xlabel(xlabel)
+
+        # --- Legend (single) ---
+        if hist_df is not None:
+            handles, labels = axes[0].get_legend_handles_labels()
+            if handles:
+                fig.legend(handles, labels, loc="upper center", ncol=2)
+
+
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+        # ---- SAVE FIGURE (IMPORTANT) ----
+        if save_path is not None:
+            fig.savefig(save_path, bbox_inches="tight")
+
+        plt.show()
+        plt.close(fig)
+        
+    
+    @staticmethod
     def predict_ensemble_emissions(
         ensemble_df: pd.DataFrame,
         model: Any,
@@ -794,14 +1719,14 @@ class EnsembleProjections:
         feature_cols : List[str]
             Column names to use as predictors (in the order the model expects).
         exponentiate : bool, default=True
-            If True, creates a 'total_emissions' column = exp(log_total_emissions).
+            If True, creates a 'total_emissions' column = expm1(log_total_emissions).
 
         Returns
         -------
         pd.DataFrame
             A copy of `ensemble_df` with two new columns:
             - 'log_total_emissions': the raw model predictions
-            - 'total_emissions'     : exp(log_total_emissions) if exponentiate=True
+            - 'total_emissions'     : expm1(log_total_emissions) if exponentiate=True
         """
         # 1) Work on a copy
         df = ensemble_df.copy()
@@ -810,11 +1735,11 @@ class EnsembleProjections:
         X = df[feature_cols]
 
         # 3) Run through the pipeline/model
-        df["log_total_emissions"] = model.predict(X)
+        df["x_log_signed_con_edgar_ghg_mt"] = model.predict(X)
 
         # 4) Optional back‐transform
         if exponentiate:
-            df["total_emissions"] = np.exp(df["log_total_emissions"])
+            df["con_edgar_ghg_mt"] = np.expm1(df["x_log_signed_con_edgar_ghg_mt"])
 
         return df
     
