@@ -1,89 +1,101 @@
-import pandas as pd
+import ast
+import json
+from dataclasses import dataclass
+from itertools import combinations
+from pathlib import Path
+from typing import Any
 import matplotlib.pyplot as plt
 import seaborn as sns
-import json
+
 import numpy as np
+import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 
-class ScenarioDiscovery:
+try:
+    from pymoo.algorithms.moo.nsga2 import NSGA2
+    from pymoo.core.problem import ElementwiseProblem
+    from pymoo.optimize import minimize
+    from pymoo.termination import get_termination
+
+    PYMOO_OK = True
+except Exception:
+    PYMOO_OK = False
+
+
+@dataclass
+class RandomForestDiscoveryResult:
+    rf_models: dict[str, Pipeline]
+    training_summary: pd.DataFrame
+    feature_importance: pd.DataFrame
+
+
+class VulnerabilityAnalyzer:
+    @staticmethod
+    def compute_emissions_change(
+        df: pd.DataFrame,
+        year1: str,
+        year2: str,
+        value_col: str,
+        id_cols: tuple[str, str] = ("future_id", "iso_alpha_3"),
+    ) -> pd.DataFrame:
+        df_pivot = df.pivot(index=list(id_cols), columns="year", values=value_col).reset_index()
+        df_pivot.columns.name = None
+        df_pivot.columns = df_pivot.columns.astype(str)
+        df_pivot["vulnerability_indicator"] = (df_pivot[year2] > df_pivot[year1]).astype(int)
+        return df_pivot[[*id_cols, year1, year2, "vulnerability_indicator"]]
 
     @staticmethod
-    def compute_emissions_change(df, year1, year2, value_col):
-        df_pivot = df.pivot(index=["future_id", "iso_alpha_3"], columns="year", values=value_col).reset_index()
-        df_pivot.columns.name = None
-
-        # ensure all column names are strings
-        df_pivot.columns = df_pivot.columns.astype(str)
-
-        # Create vulnerability_indicator field
-        df_pivot["vulnerability_indicator"] = (df_pivot[year2] > df_pivot[year1]).astype(int)
-
-        df_pivot = df_pivot[["future_id", "iso_alpha_3", year1, year2, "vulnerability_indicator"]]
-        return df_pivot
-    
+    def merge_ensemble_with_vulnerability(
+        ensemble_agg_df: pd.DataFrame,
+        vulnerability_df: pd.DataFrame,
+        on_cols: list[str] | tuple[str, ...] = ("future_id",),
+    ) -> pd.DataFrame:
+        merged_df = pd.merge(ensemble_agg_df, vulnerability_df, on=list(on_cols), how="left")
+        for col in vulnerability_df.columns:
+            if col.startswith("v"):
+                merged_df[col] = pd.to_numeric(merged_df[col], errors="coerce").astype("Int64")
+        return merged_df
 
     @staticmethod
     def plot_vulnerability_counts(
-        df,
-        vuln_col="vulnerability_indicator",
-        figsize=(6, 4),
-        palette=None,
-        xtick_labels=None,
-        xlabel="",
-        ylabel="Count",
-        title="Vulnerability Indicator Counts",
-        annotate=True,
-        order=None,
-        show=True
+        df: pd.DataFrame,
+        vuln_col: str = "vulnerability_indicator",
+        figsize: tuple[int, int] = (6, 4),
+        palette: list[str] | dict[int, str] | None = None,
+        xtick_labels: list[str] | None = None,
+        xlabel: str = "",
+        ylabel: str = "Count",
+        title: str = "Vulnerability Indicator Counts",
+        annotate: bool = True,
+        order: list[int] | None = None,
+        show: bool = True,
     ):
-        """
-        Plot a simple annotated countplot for a binary vulnerability column.
+        import matplotlib.pyplot as plt
+        import seaborn as sns
 
-        Parameters
-        ----------
-        df : pd.DataFrame
-            Dataframe containing the vulnerability column.
-        vuln_col : str
-            Column name with binary indicator (expected values like 0 and 1).
-        figsize : tuple
-            Figure size.
-        palette : list or dict
-            Colors for bars.
-        xtick_labels : list
-            Labels for x ticks (same order as `order`).
-        xlabel, ylabel, title : str
-            Axis and title text.
-        annotate : bool
-            Whether to annotate bar counts.
-        order : list
-            Explicit order of categories to plot (e.g., [0, 1]).
-        show : bool
-            Whether to call plt.show() before returning the axis.
-
-        Returns
-        -------
-        matplotlib.axes.Axes
-            The axes object of the created plot.
-        """
         if vuln_col not in df.columns:
             raise ValueError(f"Column '{vuln_col}' not found in dataframe.")
 
         palette = palette or ["tab:blue", "tab:orange"]
+        order = order or sorted(df[vuln_col].dropna().unique().tolist())
 
-        # determine order of categories
-        if order is None:
-            order = sorted(df[vuln_col].dropna().unique().tolist())
-
-        # default xtick labels for binary 0/1
         if xtick_labels is None:
-            if set(order) == {0, 1}:
-                xtick_labels = ["Not vulnerable (0)", "Vulnerable (1)"]
-            else:
-                xtick_labels = [str(v) for v in order]
+            xtick_labels = (
+                ["Not vulnerable (0)", "Vulnerable (1)"]
+                if set(order) == {0, 1}
+                else [str(v) for v in order]
+            )
 
         plt.figure(figsize=figsize)
         ax_local = plt.gca()
@@ -95,238 +107,782 @@ class ScenarioDiscovery:
         ax_local.set_title(title)
 
         if annotate:
-            for p in ax_local.patches:
-                height = p.get_height()
+            for patch in ax_local.patches:
+                height = patch.get_height()
                 ax_local.annotate(
                     f"{int(height)}",
-                    (p.get_x() + p.get_width() / 2, height),
+                    (patch.get_x() + patch.get_width() / 2, height),
                     ha="center",
-                    va="bottom"
+                    va="bottom",
                 )
 
         plt.tight_layout()
         if show:
             plt.show()
         return ax_local
-    
-    def merge_ensemble_with_vulnerability(ensemble_agg_df, vulnerability_df, on_cols=["future_id"]):
-        merged_df = pd.merge(ensemble_agg_df, vulnerability_df, on=on_cols, how="left")
-        # ensure the bin cols are integers (in case they got cast to floats during the merge)
-        # use the nullable integer dtype so NaNs are preserved instead of raising on conversion
-        for col in vulnerability_df.columns:
-            if col.startswith("v"):
-                # coerce non-finite values to NaN, then cast to pandas nullable integer dtype
-                merged_df[col] = pd.to_numeric(merged_df[col], errors="coerce").astype("Int64")
 
-        return merged_df
-    
+    @staticmethod
+    def plot_xy_by_vulnerability(
+        df: pd.DataFrame,
+        x: str | int,
+        y: str | int,
+        vuln_col: str = "vulnerability_indicator",
+        labels: dict[int, str] | None = None,
+        colors: dict[int, str] | None = None,
+        markers: dict[int, str] | None = None,
+        s: int = 60,
+        alpha: float = 0.8,
+        title: str | None = None,
+    ):
+        import matplotlib.pyplot as plt
 
-class RFUtils:
-    #Prepare data
-    X_all = merged_df[feature_cols].apply(pd.to_numeric, errors="coerce")
-    y = pd.to_numeric(merged_df[target_col], errors="coerce")
-    valid_mask = y.notna()
+        x_col = df.columns[x] if isinstance(x, int) else x
+        y_col = df.columns[y] if isinstance(y, int) else y
+        data = df[[x_col, y_col, vuln_col]].dropna()
 
-    X_target = X_all.loc[valid_mask].copy()
-    y_target = y.loc[valid_mask].astype(int)
+        uniq = np.sort(data[vuln_col].unique())
+        if not set(uniq).issubset({0, 1}):
+            raise ValueError(f"'{vuln_col}' must be binary {{0,1}}; got {uniq}.")
 
-    rf_models = {}
-    rf_training_rows = []
-    feature_importance_rows = []
-    test_size = 0.2  # keep existing value
+        labels = labels or {0: "Not vulnerable (0)", 1: "Vulnerable (1)"}
+        colors = colors or {0: "tab:blue", 1: "tab:orange"}
+        markers = markers or {0: "o", 1: "X"}
 
-    # Only one target_col expected; skip training if insufficient data or classes
-    if X_target.empty or y_target.nunique() < 2:
-        rf_training_rows.append({
-            "target_col": target_col,
-            "n_rows": int(len(y_target)),
-            "class_0": int((y_target == 0).sum()),
-            "class_1": int((y_target == 1).sum()),
-            "status": "skipped_insufficient_rows_or_classes"
-        })
-    else:
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_target,
-            y_target,
-            test_size=test_size,
-            random_state=42,
-            stratify=y_target
+        if title is None:
+            title = f"{x_col} vs {y_col} by {vuln_col}"
+
+        plt.figure(figsize=(8, 6))
+        for v in [0, 1]:
+            subset = data[data[vuln_col] == v]
+            if subset.empty:
+                continue
+            plt.scatter(
+                subset[x_col],
+                subset[y_col],
+                s=s,
+                alpha=alpha,
+                edgecolor="k",
+                color=colors.get(v, "gray"),
+                marker=markers.get(v, "o"),
+                label=labels.get(v, str(v)),
+            )
+
+        plt.xlabel(x_col)
+        plt.ylabel(y_col)
+        plt.title(title)
+        plt.grid(alpha=0.3)
+        plt.legend(title=vuln_col)
+        plt.tight_layout()
+        plt.show()
+
+
+class RandomForestDiscovery:
+    def __init__(
+        self,
+        test_size: float = 0.2,
+        random_state: int = 42,
+        n_estimators: int = 500,
+        min_samples_leaf: int = 2,
+        class_weight: str = "balanced_subsample",
+        n_jobs: int = -1,
+    ) -> None:
+        self.test_size = test_size
+        self.random_state = random_state
+        self.n_estimators = n_estimators
+        self.min_samples_leaf = min_samples_leaf
+        self.class_weight = class_weight
+        self.n_jobs = n_jobs
+
+    def _build_model(self) -> Pipeline:
+        return Pipeline(
+            [
+                ("imputer", SimpleImputer(strategy="median")),
+                (
+                    "rf",
+                    RandomForestClassifier(
+                        n_estimators=self.n_estimators,
+                        random_state=self.random_state,
+                        n_jobs=self.n_jobs,
+                        class_weight=self.class_weight,
+                        min_samples_leaf=self.min_samples_leaf,
+                    ),
+                ),
+            ]
         )
 
-        eval_model = Pipeline([
-            ("imputer", SimpleImputer(strategy="median")),
-            ("rf", RandomForestClassifier(
-                n_estimators=500,
-                random_state=42,
-                n_jobs=-1,
-                class_weight="balanced_subsample",
-                min_samples_leaf=2
-            ))
-        ])
+    def fit(
+        self,
+        merged_df: pd.DataFrame,
+        target_col: str = "vulnerability_indicator",
+        non_modeling_cols: list[str] | None = None,
+    ) -> RandomForestDiscoveryResult:
+        non_modeling_cols = non_modeling_cols or [
+            "future_id",
+            "iso_alpha_3",
+            "year_start",
+            "year_end",
+            "n_years",
+            "2022",
+            "2030",
+        ]
 
-        eval_model.fit(X_train, y_train)
-        y_pred = eval_model.predict(X_test)
-        y_proba = eval_model.predict_proba(X_test)[:, 1]
+        feature_cols = [col for col in merged_df.columns if col not in non_modeling_cols + [target_col]]
+        X_all = merged_df[feature_cols].apply(pd.to_numeric, errors="coerce")
+        y = pd.to_numeric(merged_df[target_col], errors="coerce")
+        valid_mask = y.notna()
 
-        final_model = Pipeline([
-            ("imputer", SimpleImputer(strategy="median")),
-            ("rf", RandomForestClassifier(
-                n_estimators=500,
-                random_state=42,
-                n_jobs=-1,
-                class_weight="balanced_subsample",
-                min_samples_leaf=2
-            ))
-        ])
-        final_model.fit(X_target, y_target)
-        rf_models[target_col] = final_model
+        X_target = X_all.loc[valid_mask].copy()
+        y_target = y.loc[valid_mask].astype(int)
 
-        rf = final_model.named_steps["rf"]
-        importances = rf.feature_importances_
-        max_importance = float(importances.max()) if importances.size else np.nan
-        mean_importance = float(importances.mean()) if importances.size else np.nan
-        median_importance = float(np.median(importances)) if importances.size else np.nan
-        baseline_accuracy = float(max((y_test == 0).mean(), (y_test == 1).mean()))
-        roc_auc = float(roc_auc_score(y_test, y_proba)) if y_test.nunique() == 2 else np.nan
+        rf_models: dict[str, Pipeline] = {}
+        rf_training_rows: list[dict[str, Any]] = []
+        feature_importance_rows: list[dict[str, Any]] = []
 
-        rf_training_rows.append({
-            "target_col": target_col,
-            "n_rows": int(len(y_target)),
-            "n_train": int(len(y_train)),
-            "n_test": int(len(y_test)),
-            "class_0": int((y_target == 0).sum()),
-            "class_1": int((y_target == 1).sum()),
-            "status": "trained",
-            "n_features": int(len(feature_cols)),
-            "baseline_accuracy": baseline_accuracy,
-            "test_accuracy": float(accuracy_score(y_test, y_pred)),
-            "test_balanced_accuracy": float(balanced_accuracy_score(y_test, y_pred)),
-            "test_precision": float(precision_score(y_test, y_pred, zero_division=0)),
-            "test_recall": float(recall_score(y_test, y_pred, zero_division=0)),
-            "test_f1": float(f1_score(y_test, y_pred, zero_division=0)),
-            "test_roc_auc": roc_auc,
-            "mean_importance": mean_importance,
-            "median_importance": median_importance,
-            "max_importance": max_importance,
-        })
+        if X_target.empty or y_target.nunique() < 2:
+            rf_training_rows.append(
+                {
+                    "target_col": target_col,
+                    "n_rows": int(len(y_target)),
+                    "class_0": int((y_target == 0).sum()),
+                    "class_1": int((y_target == 1).sum()),
+                    "status": "skipped_insufficient_rows_or_classes",
+                }
+            )
+        else:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X_target,
+                y_target,
+                test_size=self.test_size,
+                random_state=self.random_state,
+                stratify=y_target,
+            )
 
-        for feature_name, importance in zip(feature_cols, importances):
-            feature_importance_rows.append({
-                "target_col": target_col,
-                "feature": feature_name,
-                "importance": float(importance),
-            })
+            eval_model = self._build_model()
+            eval_model.fit(X_train, y_train)
+            y_pred = eval_model.predict(X_test)
+            y_proba = eval_model.predict_proba(X_test)[:, 1]
 
-    rf_training_summary_df = pd.DataFrame(rf_training_rows).sort_values("target_col").reset_index(drop=True)
-    feature_importance_df = pd.DataFrame(feature_importance_rows)
+            final_model = self._build_model()
+            final_model.fit(X_target, y_target)
+            rf_models[target_col] = final_model
+
+            rf = final_model.named_steps["rf"]
+            importances = rf.feature_importances_
+            baseline_accuracy = float(max((y_test == 0).mean(), (y_test == 1).mean()))
+            roc_auc = float(roc_auc_score(y_test, y_proba)) if y_test.nunique() == 2 else np.nan
+
+            rf_training_rows.append(
+                {
+                    "target_col": target_col,
+                    "n_rows": int(len(y_target)),
+                    "n_train": int(len(y_train)),
+                    "n_test": int(len(y_test)),
+                    "class_0": int((y_target == 0).sum()),
+                    "class_1": int((y_target == 1).sum()),
+                    "status": "trained",
+                    "n_features": int(len(feature_cols)),
+                    "baseline_accuracy": baseline_accuracy,
+                    "test_accuracy": float(accuracy_score(y_test, y_pred)),
+                    "test_balanced_accuracy": float(balanced_accuracy_score(y_test, y_pred)),
+                    "test_precision": float(precision_score(y_test, y_pred, zero_division=0)),
+                    "test_recall": float(recall_score(y_test, y_pred, zero_division=0)),
+                    "test_f1": float(f1_score(y_test, y_pred, zero_division=0)),
+                    "test_roc_auc": roc_auc,
+                    "mean_importance": float(importances.mean()) if importances.size else np.nan,
+                    "median_importance": float(np.median(importances)) if importances.size else np.nan,
+                    "max_importance": float(importances.max()) if importances.size else np.nan,
+                }
+            )
+
+            for feature_name, importance in zip(feature_cols, importances):
+                feature_importance_rows.append(
+                    {
+                        "target_col": target_col,
+                        "feature": feature_name,
+                        "importance": float(importance),
+                    }
+                )
+
+        training_summary = pd.DataFrame(rf_training_rows).sort_values("target_col").reset_index(drop=True)
+        feature_importance = pd.DataFrame(feature_importance_rows)
+        return RandomForestDiscoveryResult(
+            rf_models=rf_models,
+            training_summary=training_summary,
+            feature_importance=feature_importance,
+        )
+
+    @staticmethod
+    def select_top_features(
+        feature_importance_df: pd.DataFrame,
+        feature_standard_name_col: str = "feature_standard_name",
+        top_k: int = 2,
+    ) -> list[str]:
+        selected_features: list[str] = []
+        for _, row in feature_importance_df.iterrows():
+            feature_name = row[feature_standard_name_col]
+            if feature_name not in selected_features:
+                selected_features.append(feature_name)
+            if len(selected_features) >= top_k:
+                break
+        return selected_features
+    @staticmethod
+    def plot_feature_importance(feature_importance_df: pd.DataFrame, target_col: str = "vulnerability_indicator", top_n: int = 10):
+        top_features_df = (
+            feature_importance_df[feature_importance_df["target_col"] == target_col]
+            .sort_values("importance", ascending=False)
+            .head(top_n)
+        )
+
+        #plotting
+        plt.figure(figsize=(10, 6))
+        sns.barplot(x="importance", y="feature", data=top_features_df, palette="viridis")
+        plt.title(f"Top {top_n} Feature Importances for Predicting {target_col}")
+        plt.xlabel("Feature Importance")
+        plt.ylabel("Feature")
+        plt.tight_layout()
+        plt.show()
+    
+    @staticmethod
+    def plot_feature_importance_histogram(
+        df,
+        column,
+        bins=30,
+        figsize=(8, 4),
+        color="tab:blue",
+        kde=False,
+        log_scale=False,
+        xlabel=None,
+        ylabel="Count",
+        title=None,
+        annotate_stats=True,
+        dropna=True,
+        rug=False,
+        show=True,
+    ):
+        """
+        Plot a simple histogram for a dataframe column.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Dataframe containing the column to plot.
+        column : str
+            Column name to plot.
+        bins : int or sequence
+            Number of bins or bin edges for the histogram.
+        figsize : tuple
+            Figure size.
+        color : str
+            Bar color.
+        kde : bool
+            Whether to overlay a KDE (uses seaborn).
+        log_scale : bool
+            Whether to use a log scale on the x axis.
+        xlabel, ylabel, title : str or None
+            Axis and title labels.
+        annotate_stats : bool
+            Annotate mean, median and non-null count on the plot.
+        dropna : bool
+            Drop NA values before plotting.
+        rug : bool
+            Add a rug plot (seaborn).
+        show : bool
+            Whether to call plt.show() before returning the axis.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The axes object of the plot.
+        """
+        if column not in df.columns:
+            raise ValueError(f"Column '{column}' not found in dataframe.")
+
+        data = df[column]
+        if dropna:
+            data = data.dropna()
+
+        plt.figure(figsize=figsize)
+        ax = plt.gca()
+
+        # use seaborn histogram for consistency; fall back to plt.hist if needed
+        try:
+            sns.histplot(data, bins=bins, color=color, kde=kde, ax=ax, edgecolor="w", stat="count", rug=rug)
+        except Exception:
+            ax.hist(data, bins=bins, color=color, edgecolor="w")
+
+        if log_scale:
+            ax.set_xscale("log")
+
+        ax.set_xlabel(xlabel or column)
+        ax.set_ylabel(ylabel)
+        ax.set_title(title or f"Histogram of {column}")
+
+        if annotate_stats and len(data) > 0:
+            mean = float(data.mean())
+            median = float(data.median())
+            std = float(data.std())
+            n = int(data.count())
+
+            # vertical lines
+            ax.axvline(mean, color="k", linestyle="--", linewidth=1, label=f"mean={mean:.3g}")
+            ax.axvline(median, color="gray", linestyle=":", linewidth=1, label=f"median={median:.3g}")
+
+            # text annotation in upper right
+            text = f"n={n}\nmean={mean:.3g}\nmedian={median:.3g}\nstd={std:.3g}"
+            ax.text(0.98, 0.95, text, transform=ax.transAxes, ha="right", va="top",
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8), fontsize=9)
+
+            ax.legend(loc="upper left", frameon=False)
+
+        plt.tight_layout()
+        if show:
+            plt.show()
+
+        return ax
 
 
+class TrajectoryAggregator:
+    def __init__(self, rules_path: str | Path) -> None:
+        self.rules_path = Path(rules_path)
+        self.category_map, self.prefix_rules, self.default_category = self.load_projection_rulebook(self.rules_path)
 
-class ArimaAggUtils:
-
-    def load_projection_rulebook(rules_path):
-        with open(rules_path, 'r') as f:
+    @staticmethod
+    def load_projection_rulebook(rules_path: str | Path):
+        with open(rules_path, "r", encoding="utf-8") as f:
             rulebook = json.load(f)
 
-        category_map = {}
-        for category, columns in rulebook.get('categories', {}).items():
+        category_map: dict[str, str] = {}
+        for category, columns in rulebook.get("categories", {}).items():
             for col in columns:
                 category_map[col] = category
 
-        for col, category in rulebook.get('overrides', {}).items():
+        for col, category in rulebook.get("overrides", {}).items():
             category_map[col] = category
 
-        prefix_rules = rulebook.get('prefix_rules', [])
-        default_category = rulebook.get('default_category', 'unconstrained')
+        prefix_rules = rulebook.get("prefix_rules", [])
+        default_category = rulebook.get("default_category", "unconstrained")
         return category_map, prefix_rules, default_category
 
-    def resolve_category(col, category_map, prefix_rules, default_category):
+    @staticmethod
+    def resolve_category(
+        col: str,
+        category_map: dict[str, str],
+        prefix_rules: list[dict[str, str]],
+        default_category: str,
+    ) -> str:
         if col in category_map:
             return category_map[col]
         for rule in prefix_rules:
-            if col.startswith(rule['prefix']):
-                return rule['category']
+            if col.startswith(rule["prefix"]):
+                return rule["category"]
         return default_category
 
-    def _safe_std(values):
+    @staticmethod
+    def _safe_std(values: np.ndarray) -> float:
         if len(values) <= 1:
             return np.nan
         return float(np.std(values, ddof=1))
 
-    def _safe_slope(years, values):
+    @staticmethod
+    def _safe_slope(years: np.ndarray, values: np.ndarray) -> float:
         if len(values) <= 1:
             return np.nan
         return float(np.polyfit(years.astype(float), values.astype(float), 1)[0])
 
-    def summarize_trajectory(group, value_cols, category_map, prefix_rules, default_category):
-        group = group.sort_values('year')
-        row = {
-            'future_id': group['future_id'].iloc[0],
-            'iso_alpha_3': group['iso_alpha_3'].iloc[0],
-            'year_start': int(group['year'].min()),
-            'year_end': int(group['year'].max()),
-            'n_years': int(group['year'].nunique()),
+    def summarize_trajectory(self, group: pd.DataFrame, value_cols: list[str]) -> dict[str, Any]:
+        group = group.sort_values("year")
+        row: dict[str, Any] = {
+            "future_id": group["future_id"].iloc[0],
+            "iso_alpha_3": group["iso_alpha_3"].iloc[0],
+            "year_start": int(group["year"].min()),
+            "year_end": int(group["year"].max()),
+            "n_years": int(group["year"].nunique()),
         }
 
         for col in value_cols:
-            category = resolve_category(col, category_map, prefix_rules, default_category)
-            valid = group[['year', col]].dropna()
-
+            category = self.resolve_category(col, self.category_map, self.prefix_rules, self.default_category)
+            valid = group[["year", col]].dropna()
             if valid.empty:
                 continue
 
-            years = valid['year'].to_numpy()
+            years = valid["year"].to_numpy()
             values = valid[col].astype(float).to_numpy()
-            prefix = f'{col}__'
+            prefix = f"{col}__"
 
-            if category == 'binary':
-                row[prefix + 'mean'] = float(values.mean())
-                row[prefix + 'last'] = float(values[-1])
-                row[prefix + 'max'] = float(values.max())
-                row[prefix + 'switches'] = float(np.abs(np.diff(values)).sum()) if len(values) > 1 else 0.0
-            elif category == 'cumulative_binary':
-                row[prefix + 'last'] = float(values[-1])
-                row[prefix + 'max'] = float(values.max())
-            elif category == 'count':
-                row[prefix + 'sum'] = float(values.sum())
-                row[prefix + 'mean'] = float(values.mean())
-                row[prefix + 'std'] = _safe_std(values)
-                row[prefix + 'max'] = float(values.max())
-                row[prefix + 'last'] = float(values[-1])
-                row[prefix + 'delta'] = float(values[-1] - values[0])
-                row[prefix + 'slope'] = _safe_slope(years, values)
-            elif category == 'cumulative_count':
-                row[prefix + 'last'] = float(values[-1])
-                row[prefix + 'max'] = float(values.max())
-                row[prefix + 'delta'] = float(values[-1] - values[0])
-                row[prefix + 'slope'] = _safe_slope(years, values)
+            if category == "binary":
+                row[prefix + "mean"] = float(values.mean())
+                row[prefix + "last"] = float(values[-1])
+                row[prefix + "max"] = float(values.max())
+                row[prefix + "switches"] = float(np.abs(np.diff(values)).sum()) if len(values) > 1 else 0.0
+            elif category == "cumulative_binary":
+                row[prefix + "last"] = float(values[-1])
+                row[prefix + "max"] = float(values.max())
+            elif category == "count":
+                row[prefix + "sum"] = float(values.sum())
+                row[prefix + "mean"] = float(values.mean())
+                row[prefix + "std"] = self._safe_std(values)
+                row[prefix + "max"] = float(values.max())
+                row[prefix + "last"] = float(values[-1])
+                row[prefix + "delta"] = float(values[-1] - values[0])
+                row[prefix + "slope"] = self._safe_slope(years, values)
+            elif category == "cumulative_count":
+                row[prefix + "last"] = float(values[-1])
+                row[prefix + "max"] = float(values.max())
+                row[prefix + "delta"] = float(values[-1] - values[0])
+                row[prefix + "slope"] = self._safe_slope(years, values)
             else:
-                row[prefix + 'mean'] = float(values.mean())
-                row[prefix + 'std'] = _safe_std(values)
-                row[prefix + 'min'] = float(values.min())
-                row[prefix + 'max'] = float(values.max())
-                row[prefix + 'last'] = float(values[-1])
-                row[prefix + 'delta'] = float(values[-1] - values[0])
-                row[prefix + 'slope'] = _safe_slope(years, values)
+                row[prefix + "mean"] = float(values.mean())
+                row[prefix + "std"] = self._safe_std(values)
+                row[prefix + "min"] = float(values.min())
+                row[prefix + "max"] = float(values.max())
+                row[prefix + "last"] = float(values[-1])
+                row[prefix + "delta"] = float(values[-1] - values[0])
+                row[prefix + "slope"] = self._safe_slope(years, values)
 
         return row
 
-    def aggregate_ensemble_by_future_id(
-        ensemble_df,
-        rules_path,
-        group_col='future_id',
-        keep_country_col='iso_alpha_3',
-        year_col='year'
-    ):
-        category_map, prefix_rules, default_category = load_projection_rulebook(rules_path)
-
+    def aggregate(
+        self,
+        ensemble_df: pd.DataFrame,
+        group_col: str = "future_id",
+        keep_country_col: str = "iso_alpha_3",
+        year_col: str = "year",
+    ) -> pd.DataFrame:
         id_cols = {group_col, keep_country_col, year_col}
         value_cols = [col for col in ensemble_df.columns if col not in id_cols]
-
         aggregated_rows = []
         for _, group in ensemble_df.groupby(group_col, sort=False):
-            aggregated_rows.append(
-                summarize_trajectory(group, value_cols, category_map, prefix_rules, default_category)
+            aggregated_rows.append(self.summarize_trajectory(group, value_cols))
+        return pd.DataFrame(aggregated_rows)
+
+
+class ScenarioDiscoveryOptimizer:
+    def __init__(
+        self,
+        lower: float = 0.1,
+        upper: float = 0.9,
+        popsize: int = 200,
+        generations: int = 200,
+        seed: int = 55555,
+    ) -> None:
+        self.lower = lower
+        self.upper = upper
+        self.popsize = popsize
+        self.generations = generations
+        self.seed = seed
+
+    @staticmethod
+    def box_stats_multi(
+        drivers_thresholds: float | list[float],
+        pt: pd.DataFrame,
+        vulnerability_indicator: str,
+        drivers: list[str],
+        cmp: list[str] | str | None = None,
+    ) -> tuple[float, float]:
+        if np.isscalar(drivers_thresholds):
+            drivers_thresholds = [float(drivers_thresholds)] * len(drivers)
+        if cmp is None or isinstance(cmp, str):
+            cmp = [cmp if isinstance(cmp, str) else "<="] * len(drivers)
+
+        cutoffs = []
+        for col, prob in zip(drivers, drivers_thresholds):
+            cutoffs.append(np.quantile(pt[col].dropna().to_numpy(), float(prob)))
+
+        meets = pd.Series(True, index=pt.index)
+        for col, cutoff, op in zip(drivers, cutoffs, cmp):
+            x = pt[col]
+            if op == "<":
+                meets &= x < cutoff
+            elif op == "<=":
+                meets &= x <= cutoff
+            elif op == ">":
+                meets &= x > cutoff
+            elif op == ">=":
+                meets &= x >= cutoff
+            else:
+                raise ValueError(f"Unsupported comparator: {op}")
+        meets = meets.fillna(False)
+
+        v = pt[vulnerability_indicator].astype(int)
+        total_v = int((v == 1).sum())
+        in_box_v = v[meets]
+        coverage = (int((in_box_v == 1).sum()) / total_v) if total_v > 0 else np.nan
+        density = float(in_box_v.mean()) if len(in_box_v) > 0 else np.nan
+        return coverage, density
+
+    @staticmethod
+    def choose_cmp_by_corr(df: pd.DataFrame, vuln_col: str, drivers: list[str]) -> list[str]:
+        cmps = []
+        v = df[vuln_col].astype(float).to_numpy()
+        for driver in drivers:
+            x = df[driver].to_numpy()
+            mask = np.isfinite(x) & np.isfinite(v)
+            if mask.sum() < 3:
+                cmps.append("<=")
+                continue
+            corr = np.corrcoef(x[mask], v[mask])[0, 1]
+            if np.isnan(corr) or abs(corr) < 1e-9:
+                cmps.append("<=")
+            else:
+                cmps.append("<" if corr < 0 else ">")
+        return cmps
+
+    def optimize(
+        self,
+        merged_df: pd.DataFrame,
+        selected_features: list[str],
+        vuln_col: str = "vulnerability_indicator",
+    ) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+        if not PYMOO_OK:
+            raise RuntimeError("pymoo is required for optimization. Install with `pip install pymoo`.")
+
+        drivers = [f"{feature}__last" for feature in selected_features]
+        required_cols = drivers + [vuln_col]
+        missing = [col for col in required_cols if col not in merged_df.columns]
+        if missing:
+            raise ValueError(f"Missing required columns for optimization: {missing}")
+
+        pt = merged_df[required_cols].dropna().copy()
+        pt[vuln_col] = pt[vuln_col].astype(int)
+
+        if pt.empty:
+            raise ValueError("No rows remain after dropping missing values.")
+        if pt[vuln_col].nunique() < 2:
+            raise ValueError(f"{vuln_col} must contain both 0 and 1.")
+
+        cmp_selected = self.choose_cmp_by_corr(pt, vuln_col, drivers)
+        results = self.nsga2_optimize_nd(pt, vuln_col, drivers, cmp_selected)
+
+        for driver in drivers:
+            results[f"{driver}__cutoff"] = results[driver].apply(
+                lambda q, col=driver: np.quantile(pt[col].to_numpy(), q)
             )
 
-        return pd.DataFrame(aggregated_rows)
+        results["comparators"] = [cmp_selected] * len(results)
+        results = results.sort_values(["coverage", "density"], ascending=False).reset_index(drop=True)
+        return pt, results, cmp_selected
+
+    def nsga2_optimize_nd(
+        self,
+        pt: pd.DataFrame,
+        vulnerability_indicator: str,
+        drivers: list[str],
+        cmp: list[str] | None = None,
+    ) -> pd.DataFrame:
+        n = len(drivers)
+        lo = np.array([self.lower] * n, dtype=float)
+        hi = np.array([self.upper] * n, dtype=float)
+
+        optimizer = self
+
+        class Problem(ElementwiseProblem):
+            def __init__(self):
+                super().__init__(n_var=n, n_obj=2, n_constr=0, xl=lo, xu=hi)
+
+            def _evaluate(self, x, out, *args, **kwargs):
+                cov, den = optimizer.box_stats_multi(x, pt, vulnerability_indicator, drivers, cmp=cmp)
+                out["F"] = np.array([-float(cov), -float(den)])
+
+        algorithm = NSGA2(pop_size=self.popsize, eliminate_duplicates=True)
+        termination = get_termination("n_gen", self.generations)
+        res = minimize(Problem(), algorithm, termination, seed=self.seed, verbose=False)
+
+        x_res = np.atleast_2d(res.X)
+        f_res = np.atleast_2d(res.F)
+        out = pd.DataFrame({drivers[i]: x_res[:, i] for i in range(n)})
+        out["coverage"] = -f_res[:, 0]
+        out["density"] = -f_res[:, 1]
+        return out
+
+    @staticmethod
+    def plot_pareto_front(
+        optimization_results: pd.DataFrame,
+        coverage_col: str = "coverage",
+        density_col: str = "density",
+        highlight_idx: int = 0,
+        annotate: bool = True,
+        title: str = "Pareto Front: Coverage vs Density",
+    ):
+        import matplotlib.pyplot as plt
+
+        if optimization_results is None or optimization_results.empty:
+            raise ValueError("optimization_results is empty.")
+
+        data = optimization_results[[coverage_col, density_col]].dropna().copy()
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.scatter(
+            data[density_col],
+            data[coverage_col],
+            s=70,
+            alpha=0.75,
+            color="tab:blue",
+            edgecolor="k",
+            label="Pareto solutions",
+        )
+
+        if highlight_idx in data.index:
+            ax.scatter(
+                data.loc[highlight_idx, density_col],
+                data.loc[highlight_idx, coverage_col],
+                s=180,
+                color="tab:red",
+                edgecolor="k",
+                marker="*",
+                label=f"Highlighted solution (row {highlight_idx})",
+            )
+
+        if annotate:
+            for idx, row in data.iterrows():
+                ax.annotate(
+                    str(idx),
+                    (row[density_col], row[coverage_col]),
+                    xytext=(5, 5),
+                    textcoords="offset points",
+                    fontsize=8,
+                )
+
+        ax.set_xlabel("Density")
+        ax.set_ylabel("Coverage")
+        ax.set_title(title)
+        ax.grid(alpha=0.3)
+        ax.legend(loc="best")
+        plt.tight_layout()
+        plt.show()
+        return ax
+
+    @staticmethod
+    def plot_boxed_scatter_from_optimization_result(
+        pt: pd.DataFrame,
+        optimization_results: pd.DataFrame,
+        row_idx: int = 0,
+        vuln_col: str = "vulnerability_indicator",
+        x_col: str | None = None,
+        y_col: str | None = None,
+        pairwise_if_needed: bool = True,
+        max_cols: int = 3,
+        labels: dict[int, str] | None = None,
+        colors: dict[int, str] | None = None,
+        markers: dict[int, str] | None = None,
+        s: int = 60,
+        alpha_pts: float = 0.8,
+        box_color: str = "red",
+        box_alpha: float = 0.08,
+        box_edgecolor: str = "red",
+        title: str | None = None,
+    ) -> dict[str, Any]:
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+
+        result_row = optimization_results.iloc[row_idx]
+        driver_cols = [
+            col
+            for col in optimization_results.columns
+            if col in pt.columns and col != vuln_col and f"{col}__cutoff" in optimization_results.columns
+        ]
+        cmp_raw = result_row.get("comparators", None)
+        cmp_values = ast.literal_eval(cmp_raw) if isinstance(cmp_raw, str) else list(cmp_raw)
+        comparator_map = dict(zip(driver_cols, cmp_values))
+
+        labels = labels or {0: "Not vulnerable (0)", 1: "Vulnerable (1)"}
+        colors = colors or {0: "tab:blue", 1: "tab:orange"}
+        markers = markers or {0: "o", 1: "X"}
+
+        def interval(lim_min: float, lim_max: float, thr: float, sign: str) -> tuple[float, float]:
+            if sign in ("<", "<="):
+                return lim_min, min(thr, lim_max)
+            if sign in (">", ">="):
+                return max(thr, lim_min), lim_max
+            raise ValueError(f"Comparator not supported: {sign}")
+
+        def draw_projection(ax, x_name: str, y_name: str, show_legend: bool = False) -> dict[str, Any]:
+            cutoff_x = float(result_row[f"{x_name}__cutoff"])
+            cutoff_y = float(result_row[f"{y_name}__cutoff"])
+            cmp_x = comparator_map[x_name]
+            cmp_y = comparator_map[y_name]
+
+            subset_data = pt[[x_name, y_name, vuln_col]].dropna().copy()
+            subset_data[vuln_col] = subset_data[vuln_col].astype(int)
+
+            for value in [0, 1]:
+                subset = subset_data[subset_data[vuln_col] == value]
+                if subset.empty:
+                    continue
+                ax.scatter(
+                    subset[x_name],
+                    subset[y_name],
+                    s=s,
+                    alpha=alpha_pts,
+                    edgecolor="k",
+                    color=colors.get(value, "gray"),
+                    marker=markers.get(value, "o"),
+                    label=labels.get(value, str(value)) if show_legend else None,
+                )
+
+            ax.axvline(cutoff_x, ls="--", lw=2, color="black", alpha=0.7)
+            ax.axhline(cutoff_y, ls="--", lw=2, color="black", alpha=0.7)
+
+            xmin, xmax = ax.get_xlim()
+            ymin, ymax = ax.get_ylim()
+            x0, x1 = interval(xmin, xmax, cutoff_x, cmp_x)
+            y0, y1 = interval(ymin, ymax, cutoff_y, cmp_y)
+            if x1 > x0 and y1 > y0:
+                ax.add_patch(
+                    Rectangle((x0, y0), x1 - x0, y1 - y0, facecolor="none", edgecolor=box_edgecolor, linewidth=2)
+                )
+                ax.add_patch(
+                    Rectangle((x0, y0), x1 - x0, y1 - y0, facecolor=box_color, alpha=box_alpha, edgecolor="none")
+                )
+
+            ax.set_xlabel(x_name)
+            ax.set_ylabel(y_name)
+            ax.set_title(f"{x_name} vs {y_name}")
+            ax.grid(alpha=0.3)
+            if show_legend:
+                ax.legend(loc="best")
+
+            return {
+                "x_col": x_name,
+                "y_col": y_name,
+                "cutoff_x": cutoff_x,
+                "cutoff_y": cutoff_y,
+                "comparators": {x_name: cmp_x, y_name: cmp_y},
+            }
+
+        if x_col is not None or y_col is not None or len(driver_cols) == 2 or not pairwise_if_needed:
+            x_col = x_col or driver_cols[0]
+            y_col = y_col or driver_cols[1]
+            fig, ax = plt.subplots(figsize=(8, 6))
+            info = draw_projection(ax, x_col, y_col, show_legend=True)
+
+            if title is None:
+                title = (
+                    f"Optimized Box for row {row_idx} | coverage={result_row['coverage']:.3f}, "
+                    f"density={result_row['density']:.3f}"
+                )
+            ax.set_title(title)
+            plt.tight_layout()
+            plt.show()
+            return {"row_idx": row_idx, "mode": "single_pair", **info}
+
+        pairs = list(combinations(driver_cols, 2))
+        n_pairs = len(pairs)
+        n_cols = min(max_cols, n_pairs)
+        n_rows = int(np.ceil(n_pairs / n_cols))
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows), squeeze=False)
+        axes_flat = axes.flatten()
+        pair_info = []
+
+        for ax, (x_name, y_name) in zip(axes_flat, pairs):
+            pair_info.append(draw_projection(ax, x_name, y_name, show_legend=(x_name, y_name) == pairs[0]))
+        for ax in axes_flat[n_pairs:]:
+            ax.set_visible(False)
+
+        if title is None:
+            title = (
+                f"Pairwise optimized box projections for row {row_idx} | "
+                f"coverage={result_row['coverage']:.3f}, density={result_row['density']:.3f}"
+            )
+        fig.suptitle(title, y=1.02)
+        plt.tight_layout()
+        plt.show()
+        return {"row_idx": row_idx, "mode": "pairwise", "driver_cols": driver_cols, "pairs": pair_info}
