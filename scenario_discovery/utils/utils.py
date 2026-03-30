@@ -1,5 +1,6 @@
 import ast
 import json
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
@@ -42,18 +43,73 @@ class RandomForestDiscoveryResult:
 
 class VulnerabilityAnalyzer:
     @staticmethod
+    def compute_vulnerability_indicator(
+        df: pd.DataFrame,
+        year1: str,
+        year2: str,
+        value_col: str,
+        id_cols: tuple[str, str] = ("future_id", "iso_alpha_3"),
+        auto_threshold: bool = False,
+    ) -> pd.DataFrame:
+        df_pivot = df.pivot(index=list(id_cols), columns="year", values=value_col).reset_index()
+        df_pivot.columns.name = None
+        df_pivot.columns = df_pivot.columns.astype(str)
+
+        if auto_threshold:
+            year2_values = pd.to_numeric(df_pivot[year2], errors="coerce")
+            valid_values = np.sort(year2_values.dropna().to_numpy())
+            if len(valid_values) == 0:
+                raise ValueError(f"Column '{year2}' has no valid numeric values for threshold selection.")
+
+            # Pick the split point that minimizes class imbalance.
+            # Using a midpoint between adjacent sorted values avoids thresholding exactly on a repeated value.
+            best_threshold = float(valid_values[0])
+            best_imbalance = len(valid_values)
+
+            if len(valid_values) == 1:
+                best_threshold = float(valid_values[0])
+            else:
+                candidate_thresholds = []
+                for idx in range(len(valid_values) - 1):
+                    left = float(valid_values[idx])
+                    right = float(valid_values[idx + 1])
+                    candidate_thresholds.append((left + right) / 2.0)
+
+                # Include the median as a fallback candidate as well.
+                candidate_thresholds.append(float(np.quantile(valid_values, 0.5)))
+
+                for threshold in candidate_thresholds:
+                    positive_count = int((year2_values > threshold).sum())
+                    negative_count = int((year2_values <= threshold).sum())
+                    imbalance = abs(positive_count - negative_count)
+                    if imbalance < best_imbalance:
+                        best_imbalance = imbalance
+                        best_threshold = float(threshold)
+
+            df_pivot["vulnerability_threshold"] = best_threshold
+            df_pivot["vulnerability_indicator"] = (year2_values > best_threshold).astype(int)
+            return df_pivot[[*id_cols, year1, year2, "vulnerability_threshold", "vulnerability_indicator"]]
+
+        df_pivot["vulnerability_indicator"] = (df_pivot[year2] > df_pivot[year1]).astype(int)
+        return df_pivot[[*id_cols, year1, year2, "vulnerability_indicator"]]
+
+    @staticmethod
     def compute_emissions_change(
         df: pd.DataFrame,
         year1: str,
         year2: str,
         value_col: str,
         id_cols: tuple[str, str] = ("future_id", "iso_alpha_3"),
+        auto_threshold: bool = False,
     ) -> pd.DataFrame:
-        df_pivot = df.pivot(index=list(id_cols), columns="year", values=value_col).reset_index()
-        df_pivot.columns.name = None
-        df_pivot.columns = df_pivot.columns.astype(str)
-        df_pivot["vulnerability_indicator"] = (df_pivot[year2] > df_pivot[year1]).astype(int)
-        return df_pivot[[*id_cols, year1, year2, "vulnerability_indicator"]]
+        return VulnerabilityAnalyzer.compute_vulnerability_indicator(
+            df=df,
+            year1=year1,
+            year2=year2,
+            value_col=value_col,
+            id_cols=id_cols,
+            auto_threshold=auto_threshold,
+        )
 
     @staticmethod
     def merge_ensemble_with_vulnerability(
@@ -63,7 +119,7 @@ class VulnerabilityAnalyzer:
     ) -> pd.DataFrame:
         merged_df = pd.merge(ensemble_agg_df, vulnerability_df, on=list(on_cols), how="left")
         for col in vulnerability_df.columns:
-            if col.startswith("v"):
+            if "indicator" in col:
                 merged_df[col] = pd.to_numeric(merged_df[col], errors="coerce").astype("Int64")
         return merged_df
 
@@ -174,6 +230,65 @@ class VulnerabilityAnalyzer:
         plt.legend(title=vuln_col)
         plt.tight_layout()
         plt.show()
+
+    @staticmethod
+    def plot_future_distribution_with_baseline(
+        df_pivot: pd.DataFrame,
+        future_col: str = "2030",
+        baseline_col: str = "2022",
+        bins: int = 30,
+        figsize: tuple[int, int] = (8, 4),
+        color: str = "tab:blue",
+        baseline_color: str = "tab:red",
+        kde: bool = False,
+        xlabel: str | None = None,
+        ylabel: str = "Count",
+        title: str | None = None,
+        show: bool = True,
+    ):
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
+        if future_col not in df_pivot.columns:
+            raise ValueError(f"Column '{future_col}' not found in dataframe.")
+        if baseline_col not in df_pivot.columns:
+            raise ValueError(f"Column '{baseline_col}' not found in dataframe.")
+
+        future_values = pd.to_numeric(df_pivot[future_col], errors="coerce").dropna()
+        baseline_values = pd.to_numeric(df_pivot[baseline_col], errors="coerce").dropna().unique()
+
+        if future_values.empty:
+            raise ValueError(f"Column '{future_col}' has no valid numeric values to plot.")
+        if len(baseline_values) == 0:
+            raise ValueError(f"Column '{baseline_col}' has no valid numeric values.")
+        if len(baseline_values) > 1:
+            raise ValueError(
+                f"Column '{baseline_col}' contains multiple values; expected a single baseline value, "
+                f"got {len(baseline_values)} unique values."
+            )
+
+        baseline_value = float(baseline_values[0])
+
+        plt.figure(figsize=figsize)
+        ax = plt.gca()
+        sns.histplot(future_values, bins=bins, color=color, kde=kde, ax=ax, edgecolor="w")
+        ax.axvline(
+            baseline_value,
+            color=baseline_color,
+            linestyle="--",
+            linewidth=2,
+            label=f"{baseline_col} = {baseline_value:.3g}",
+        )
+
+        ax.set_xlabel(xlabel or future_col)
+        ax.set_ylabel(ylabel)
+        ax.set_title(title or f"Distribution of {future_col} with {baseline_col} reference")
+        ax.legend(loc="best")
+        plt.tight_layout()
+
+        if show:
+            plt.show()
+        return ax
 
 
 class RandomForestDiscovery:
@@ -769,6 +884,9 @@ class ScenarioDiscoveryOptimizer:
         box_alpha: float = 0.08,
         box_edgecolor: str = "red",
         title: str | None = None,
+        save_path: str | Path | None = None,
+        show: bool = True,
+        close: bool = False,
     ) -> dict[str, Any]:
         import matplotlib.pyplot as plt
         from matplotlib.patches import Rectangle
@@ -861,7 +979,13 @@ class ScenarioDiscoveryOptimizer:
                 )
             ax.set_title(title)
             plt.tight_layout()
-            plt.show()
+            if save_path is not None:
+                Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+                fig.savefig(save_path, dpi=300, bbox_inches="tight")
+            if show:
+                plt.show()
+            if close:
+                plt.close(fig)
             return {"row_idx": row_idx, "mode": "single_pair", **info}
 
         pairs = list(combinations(driver_cols, 2))
@@ -884,5 +1008,247 @@ class ScenarioDiscoveryOptimizer:
             )
         fig.suptitle(title, y=1.02)
         plt.tight_layout()
-        plt.show()
+        if save_path is not None:
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        if show:
+            plt.show()
+        if close:
+            plt.close(fig)
         return {"row_idx": row_idx, "mode": "pairwise", "driver_cols": driver_cols, "pairs": pair_info}
+
+
+class ScenarioDiscoveryBatchRunner:
+    def __init__(
+        self,
+        projected_df: pd.DataFrame,
+        ensemble_df: pd.DataFrame,
+        rules_path: str | Path,
+        value_col: str = "con_edgar_ghg_mt_hp_trend",
+        year1: str = "2022",
+        year2: str = "2030",
+        target_col: str = "vulnerability_indicator",
+        top_k: int = 2,
+        extra_features: list[str] | None = None,
+        non_modeling_cols: list[str] | None = None,
+        emission_cols: list[str] | None = None,
+        rf_discovery: RandomForestDiscovery | None = None,
+        optimizer: ScenarioDiscoveryOptimizer | None = None,
+    ) -> None:
+        self.projected_df = projected_df.copy()
+        self.ensemble_df = ensemble_df.copy()
+        self.rules_path = Path(rules_path)
+        self.value_col = value_col
+        self.year1 = year1
+        self.year2 = year2
+        self.target_col = target_col
+        self.top_k = top_k
+        self.extra_features = extra_features or []
+        self.non_modeling_cols = non_modeling_cols or [
+            "future_id",
+            "iso_alpha_3",
+            "year_start",
+            "year_end",
+            "n_years",
+            self.year1,
+            self.year2,
+        ]
+        self.emission_cols = emission_cols or [
+            "x_log_signed_con_edgar_ghg_mt",
+            "emissions_anchor_2022",
+            "years_since_2022",
+            "trend_year_interaction",
+            "em_lag_1y",
+            "em_trend_3y",
+            "em_trend_5y",
+            "em_volatility_5y",
+            "em_acceleration",
+        ]
+        self.rf_discovery = rf_discovery or RandomForestDiscovery()
+        self.optimizer = optimizer or ScenarioDiscoveryOptimizer()
+        self.trajectory_aggregator = TrajectoryAggregator(self.rules_path)
+
+    @staticmethod
+    def _prepare_feature_importance(feature_importance_df: pd.DataFrame) -> pd.DataFrame:
+        if feature_importance_df.empty:
+            return feature_importance_df.copy()
+        out = feature_importance_df.copy()
+        out["feature_standard_name"] = out["feature"].apply(lambda x: x.split("__")[0] if "__" in x else x)
+        return out.sort_values("importance", ascending=False).reset_index(drop=True)
+
+    @staticmethod
+    def _combine_features(selected_top_features: list[str], extra_features: list[str]) -> list[str]:
+        combined: list[str] = []
+        for feature in [*selected_top_features, *extra_features]:
+            if feature not in combined:
+                combined.append(feature)
+        return combined
+
+    def run_country(
+        self,
+        iso_alpha_3: str,
+        output_dir: str | Path,
+        extra_features: list[str] | None = None,
+        top_k: int | None = None,
+        boxed_plot_row_idx: int = 0,
+    ) -> dict[str, Any]:
+        output_dir = Path(output_dir)
+        country_output_dir = output_dir / iso_alpha_3
+        country_output_dir.mkdir(parents=True, exist_ok=True)
+
+        country_projected_df = self.projected_df[self.projected_df["iso_alpha_3"] == iso_alpha_3].copy()
+        if country_projected_df.empty:
+            raise ValueError(f"No projected data found for country '{iso_alpha_3}'.")
+
+        df_pivot = VulnerabilityAnalyzer.compute_emissions_change(
+            country_projected_df,
+            self.year1,
+            self.year2,
+            self.value_col,
+        )
+
+        country_ensemble_df = self.ensemble_df.drop(columns=self.emission_cols, errors="ignore")
+        country_ensemble_df = country_ensemble_df[country_ensemble_df["iso_alpha_3"] == iso_alpha_3].copy()
+        if country_ensemble_df.empty:
+            raise ValueError(f"No ensemble data found for country '{iso_alpha_3}'.")
+
+        ensemble_agg_df = self.trajectory_aggregator.aggregate(country_ensemble_df)
+        merged_df = VulnerabilityAnalyzer.merge_ensemble_with_vulnerability(
+            ensemble_agg_df,
+            df_pivot,
+            on_cols=["future_id", "iso_alpha_3"],
+        )
+
+        rf_result = self.rf_discovery.fit(
+            merged_df,
+            target_col=self.target_col,
+            non_modeling_cols=self.non_modeling_cols,
+        )
+        feature_importance_df = self._prepare_feature_importance(rf_result.feature_importance)
+        if feature_importance_df.empty:
+            raise ValueError(f"No feature importance results available for country '{iso_alpha_3}'.")
+
+        selected_top_features = self.rf_discovery.select_top_features(
+            feature_importance_df,
+            feature_standard_name_col="feature_standard_name",
+            top_k=top_k or self.top_k,
+        )
+        features_for_optimization = self._combine_features(
+            selected_top_features,
+            extra_features if extra_features is not None else self.extra_features,
+        )
+
+        pt, optimization_results, cmp_selected = self.optimizer.optimize(
+            merged_df,
+            features_for_optimization,
+            vuln_col=self.target_col,
+        )
+
+        optimization_results_path = country_output_dir / "optimization_results.csv"
+        plot_path = country_output_dir / "boxed_scatter.png"
+        feature_importance_path = country_output_dir / "feature_importance.csv"
+        training_summary_path = country_output_dir / "rf_training_summary.csv"
+
+        optimization_results.to_csv(optimization_results_path, index=False)
+        feature_importance_df.to_csv(feature_importance_path, index=False)
+        rf_result.training_summary.to_csv(training_summary_path, index=False)
+
+        plot_info = self.optimizer.plot_boxed_scatter_from_optimization_result(
+            pt,
+            optimization_results,
+            row_idx=boxed_plot_row_idx,
+            save_path=plot_path,
+            show=False,
+            close=True,
+        )
+
+        return {
+            "country": iso_alpha_3,
+            "status": "success",
+            "selected_top_features": selected_top_features,
+            "features_for_optimization": features_for_optimization,
+            "cmp_selected": cmp_selected,
+            "n_optimization_rows": int(len(optimization_results)),
+            "optimization_results_path": str(optimization_results_path),
+            "boxed_scatter_path": str(plot_path),
+            "feature_importance_path": str(feature_importance_path),
+            "rf_training_summary_path": str(training_summary_path),
+            "plot_info": plot_info,
+        }
+
+    def run_many(
+        self,
+        countries: list[str],
+        output_dir: str | Path,
+        extra_features_by_country: dict[str, list[str]] | None = None,
+        top_k_by_country: dict[str, int] | None = None,
+        boxed_plot_row_idx: int = 0,
+        continue_on_error: bool = True,
+    ) -> dict[str, pd.DataFrame]:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        summary_rows: list[dict[str, Any]] = []
+        feature_counter: Counter[str] = Counter()
+        feature_countries: defaultdict[str, list[str]] = defaultdict(list)
+
+        for country in countries:
+            try:
+                result = self.run_country(
+                    country,
+                    output_dir=output_dir,
+                    extra_features=(extra_features_by_country or {}).get(country),
+                    top_k=(top_k_by_country or {}).get(country),
+                    boxed_plot_row_idx=boxed_plot_row_idx,
+                )
+                summary_rows.append(
+                    {
+                        "country": result["country"],
+                        "status": result["status"],
+                        "selected_top_features": "|".join(result["selected_top_features"]),
+                        "features_for_optimization": "|".join(result["features_for_optimization"]),
+                        "n_optimization_rows": result["n_optimization_rows"],
+                        "optimization_results_path": result["optimization_results_path"],
+                        "boxed_scatter_path": result["boxed_scatter_path"],
+                    }
+                )
+                for feature in result["selected_top_features"]:
+                    feature_counter[feature] += 1
+                    feature_countries[feature].append(country)
+            except Exception as exc:
+                summary_rows.append(
+                    {
+                        "country": country,
+                        "status": "error",
+                        "selected_top_features": "",
+                        "features_for_optimization": "",
+                        "n_optimization_rows": 0,
+                        "optimization_results_path": "",
+                        "boxed_scatter_path": "",
+                        "error": str(exc),
+                    }
+                )
+                if not continue_on_error:
+                    raise
+
+        summary_df = pd.DataFrame(summary_rows)
+        feature_frequency_df = pd.DataFrame(
+            [
+                {
+                    "feature": feature,
+                    "count": count,
+                    "countries": "|".join(sorted(feature_countries[feature])),
+                }
+                for feature, count in feature_counter.most_common()
+            ]
+        )
+
+        summary_path = output_dir / "country_run_summary.csv"
+        feature_frequency_path = output_dir / "top_variable_frequency_report.csv"
+        summary_df.to_csv(summary_path, index=False)
+        feature_frequency_df.to_csv(feature_frequency_path, index=False)
+
+        return {
+            "country_run_summary": summary_df,
+            "top_variable_frequency_report": feature_frequency_df,
+        }
