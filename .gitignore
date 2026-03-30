@@ -179,3 +179,4 @@ ml_scripts/img/
 ml_scripts/output/hp_filtered/
 ml_scripts/output/2030_emissions/*.csv
 ml_scripts/docs
+scenario_discovery/scenario_discovery_outputs/
