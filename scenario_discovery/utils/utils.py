@@ -244,7 +244,9 @@ class VulnerabilityAnalyzer:
         xlabel: str | None = None,
         ylabel: str = "Count",
         title: str | None = None,
+        save_path: str | Path | None = None,
         show: bool = True,
+        close: bool = False,
     ):
         import matplotlib.pyplot as plt
         import seaborn as sns
@@ -286,8 +288,13 @@ class VulnerabilityAnalyzer:
         ax.legend(loc="best")
         plt.tight_layout()
 
+        if save_path is not None:
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+            plt.gcf().savefig(save_path, dpi=300, bbox_inches="tight")
         if show:
             plt.show()
+        if close:
+            plt.close(plt.gcf())
         return ax
 
 
@@ -1055,6 +1062,8 @@ class ScenarioDiscoveryBatchRunner:
             self.year1,
             self.year2,
         ]
+        if self.auto_threshold and "vulnerability_threshold" not in self.non_modeling_cols:
+            self.non_modeling_cols.append("vulnerability_threshold")
         self.emission_cols = emission_cols or [
             "x_log_signed_con_edgar_ghg_mt",
             "emissions_anchor_2022",
@@ -1154,12 +1163,26 @@ class ScenarioDiscoveryBatchRunner:
 
         optimization_results_path = country_output_dir / "optimization_results.csv"
         plot_path = country_output_dir / "boxed_scatter.png"
+        future_distribution_plot_path = country_output_dir / "future_distribution_with_baseline.png"
         feature_importance_path = country_output_dir / "feature_importance.csv"
         training_summary_path = country_output_dir / "rf_training_summary.csv"
 
         optimization_results.to_csv(optimization_results_path, index=False)
         feature_importance_df.to_csv(feature_importance_path, index=False)
         rf_result.training_summary.to_csv(training_summary_path, index=False)
+
+        VulnerabilityAnalyzer.plot_future_distribution_with_baseline(
+            df_pivot,
+            future_col=self.year2,
+            baseline_col="vulnerability_threshold" if self.auto_threshold else self.year1,
+            title=(
+                f"{iso_alpha_3}: Distribution of {self.year2} with "
+                f"{'vulnerability_threshold' if self.auto_threshold else self.year1} baseline"
+            ),
+            save_path=future_distribution_plot_path,
+            show=False,
+            close=True,
+        )
 
         plot_info = self.optimizer.plot_boxed_scatter_from_optimization_result(
             pt,
@@ -1181,6 +1204,7 @@ class ScenarioDiscoveryBatchRunner:
             "n_optimization_rows": int(len(optimization_results)),
             "optimization_results_path": str(optimization_results_path),
             "boxed_scatter_path": str(plot_path),
+            "future_distribution_plot_path": str(future_distribution_plot_path),
             "feature_importance_path": str(feature_importance_path),
             "rf_training_summary_path": str(training_summary_path),
             "plot_info": plot_info,
@@ -1222,6 +1246,7 @@ class ScenarioDiscoveryBatchRunner:
                         "n_optimization_rows": result["n_optimization_rows"],
                         "optimization_results_path": result["optimization_results_path"],
                         "boxed_scatter_path": result["boxed_scatter_path"],
+                        "future_distribution_plot_path": result["future_distribution_plot_path"],
                     }
                 )
                 for feature in result["selected_top_features"]:
@@ -1239,6 +1264,7 @@ class ScenarioDiscoveryBatchRunner:
                         "n_optimization_rows": 0,
                         "optimization_results_path": "",
                         "boxed_scatter_path": "",
+                        "future_distribution_plot_path": "",
                         "error": str(exc),
                     }
                 )
