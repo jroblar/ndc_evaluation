@@ -1028,6 +1028,7 @@ class ScenarioDiscoveryBatchRunner:
         year1: str = "2022",
         year2: str = "2030",
         target_col: str = "vulnerability_indicator",
+        auto_threshold: bool = False,
         top_k: int = 2,
         extra_features: list[str] | None = None,
         non_modeling_cols: list[str] | None = None,
@@ -1042,6 +1043,7 @@ class ScenarioDiscoveryBatchRunner:
         self.year1 = year1
         self.year2 = year2
         self.target_col = target_col
+        self.auto_threshold = auto_threshold
         self.top_k = top_k
         self.extra_features = extra_features or []
         self.non_modeling_cols = non_modeling_cols or [
@@ -1100,11 +1102,17 @@ class ScenarioDiscoveryBatchRunner:
         if country_projected_df.empty:
             raise ValueError(f"No projected data found for country '{iso_alpha_3}'.")
 
-        df_pivot = VulnerabilityAnalyzer.compute_emissions_change(
+        df_pivot = VulnerabilityAnalyzer.compute_vulnerability_indicator(
             country_projected_df,
             self.year1,
             self.year2,
             self.value_col,
+            auto_threshold=self.auto_threshold,
+        )
+        vulnerability_threshold = (
+            float(df_pivot["vulnerability_threshold"].dropna().iloc[0])
+            if "vulnerability_threshold" in df_pivot.columns and not df_pivot["vulnerability_threshold"].dropna().empty
+            else None
         )
 
         country_ensemble_df = self.ensemble_df.drop(columns=self.emission_cols, errors="ignore")
@@ -1165,6 +1173,8 @@ class ScenarioDiscoveryBatchRunner:
         return {
             "country": iso_alpha_3,
             "status": "success",
+            "auto_threshold": self.auto_threshold,
+            "vulnerability_threshold": vulnerability_threshold,
             "selected_top_features": selected_top_features,
             "features_for_optimization": features_for_optimization,
             "cmp_selected": cmp_selected,
@@ -1205,6 +1215,8 @@ class ScenarioDiscoveryBatchRunner:
                     {
                         "country": result["country"],
                         "status": result["status"],
+                        "auto_threshold": result["auto_threshold"],
+                        "vulnerability_threshold": result["vulnerability_threshold"],
                         "selected_top_features": "|".join(result["selected_top_features"]),
                         "features_for_optimization": "|".join(result["features_for_optimization"]),
                         "n_optimization_rows": result["n_optimization_rows"],
@@ -1220,6 +1232,8 @@ class ScenarioDiscoveryBatchRunner:
                     {
                         "country": country,
                         "status": "error",
+                        "auto_threshold": self.auto_threshold,
+                        "vulnerability_threshold": None,
                         "selected_top_features": "",
                         "features_for_optimization": "",
                         "n_optimization_rows": 0,
