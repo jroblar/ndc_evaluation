@@ -960,7 +960,6 @@ class ScenarioDiscoveryOptimizer:
 
             ax.set_xlabel(x_name)
             ax.set_ylabel(y_name)
-            ax.set_title(f"{x_name} vs {y_name}")
             ax.grid(alpha=0.3)
             if show_legend:
                 ax.legend(loc="best")
@@ -984,7 +983,7 @@ class ScenarioDiscoveryOptimizer:
                     f"Optimized Box for row {row_idx} | coverage={result_row['coverage']:.3f}, "
                     f"density={result_row['density']:.3f}"
                 )
-            ax.set_title(title)
+            fig.suptitle(title, y=1.02)
             plt.tight_layout()
             if save_path is not None:
                 Path(save_path).parent.mkdir(parents=True, exist_ok=True)
