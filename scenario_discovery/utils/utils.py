@@ -1324,12 +1324,24 @@ class ScenarioDiscoveryBatchRunner:
             show=False,
             close=True,
         )
+        selected_result_rows = (
+            optimization_results[optimization_results["selected_solution"]]
+            if "selected_solution" in optimization_results.columns
+            else optimization_results.iloc[0:0]
+        )
+        selected_result = selected_result_rows.iloc[0] if not selected_result_rows.empty else optimization_results.iloc[0]
+        selected_density = float(selected_result["density"])
+        selected_coverage = float(selected_result["coverage"])
 
         return {
             "country": iso_alpha_3,
             "status": "success",
             "auto_threshold": self.auto_threshold,
             "vulnerability_threshold": vulnerability_threshold,
+            "selected_coverage": selected_coverage,
+            "selected_density": selected_density,
+            "selected_density_threshold": selected_result.get("selected_density_threshold", np.nan),
+            "selected_density_below_min": bool(selected_density < self.optimizer.min_density),
             "selected_top_features": selected_top_features,
             "features_for_optimization": features_for_optimization,
             "cmp_selected": cmp_selected,
@@ -1373,6 +1385,10 @@ class ScenarioDiscoveryBatchRunner:
                         "status": result["status"],
                         "auto_threshold": result["auto_threshold"],
                         "vulnerability_threshold": result["vulnerability_threshold"],
+                        "selected_coverage": result["selected_coverage"],
+                        "selected_density": result["selected_density"],
+                        "selected_density_threshold": result["selected_density_threshold"],
+                        "selected_density_below_min": result["selected_density_below_min"],
                         "selected_top_features": "|".join(result["selected_top_features"]),
                         "features_for_optimization": "|".join(result["features_for_optimization"]),
                         "n_optimization_rows": result["n_optimization_rows"],
@@ -1391,6 +1407,10 @@ class ScenarioDiscoveryBatchRunner:
                         "status": "error",
                         "auto_threshold": self.auto_threshold,
                         "vulnerability_threshold": None,
+                        "selected_coverage": None,
+                        "selected_density": None,
+                        "selected_density_threshold": None,
+                        "selected_density_below_min": None,
                         "selected_top_features": "",
                         "features_for_optimization": "",
                         "n_optimization_rows": 0,
