@@ -1283,6 +1283,25 @@ class ScenarioDiscoveryBatchRunner:
                 combined.append(feature)
         return combined
 
+    @staticmethod
+    def _single_numeric_value(df: pd.DataFrame, col: str) -> float | None:
+        if col not in df.columns:
+            return None
+        values = pd.to_numeric(df[col], errors="coerce").dropna().unique()
+        if len(values) == 0:
+            return None
+        if len(values) > 1 and not np.allclose(values, values[0]):
+            return None
+        return float(values[0])
+
+    @staticmethod
+    def _compare_numeric_values(value: float | None, reference: float | None) -> str | None:
+        if value is None or reference is None:
+            return None
+        if np.isclose(value, reference):
+            return "equal"
+        return "above" if value > reference else "below"
+
     def run_country(
         self,
         iso_alpha_3: str,
@@ -1310,6 +1329,13 @@ class ScenarioDiscoveryBatchRunner:
             float(df_pivot["vulnerability_threshold"].dropna().iloc[0])
             if "vulnerability_threshold" in df_pivot.columns and not df_pivot["vulnerability_threshold"].dropna().empty
             else None
+        )
+        year1_value = self._single_numeric_value(df_pivot, self.year1)
+        ndc_unconditional_value = self._single_numeric_value(df_pivot, NDC_UNCONDITIONAL_COL)
+        vulnerability_threshold_vs_year1 = self._compare_numeric_values(vulnerability_threshold, year1_value)
+        vulnerability_threshold_vs_ndc_unconditional = self._compare_numeric_values(
+            vulnerability_threshold,
+            ndc_unconditional_value,
         )
 
         country_ensemble_df = self.ensemble_df.drop(columns=self.emission_cols, errors="ignore")
@@ -1394,6 +1420,8 @@ class ScenarioDiscoveryBatchRunner:
             "status": "success",
             "auto_threshold": self.auto_threshold,
             "vulnerability_threshold": vulnerability_threshold,
+            f"vulnerability_threshold_vs_{self.year1}": vulnerability_threshold_vs_year1,
+            "vulnerability_threshold_vs_ndc_unconditional": vulnerability_threshold_vs_ndc_unconditional,
             "selected_coverage": selected_coverage,
             "selected_density": selected_density,
             "selected_density_threshold": selected_result.get("selected_density_threshold", np.nan),
@@ -1441,6 +1469,10 @@ class ScenarioDiscoveryBatchRunner:
                         "status": result["status"],
                         "auto_threshold": result["auto_threshold"],
                         "vulnerability_threshold": result["vulnerability_threshold"],
+                        f"vulnerability_threshold_vs_{self.year1}": result[f"vulnerability_threshold_vs_{self.year1}"],
+                        "vulnerability_threshold_vs_ndc_unconditional": result[
+                            "vulnerability_threshold_vs_ndc_unconditional"
+                        ],
                         "selected_coverage": result["selected_coverage"],
                         "selected_density": result["selected_density"],
                         "selected_density_threshold": result["selected_density_threshold"],
@@ -1463,6 +1495,8 @@ class ScenarioDiscoveryBatchRunner:
                         "status": "error",
                         "auto_threshold": self.auto_threshold,
                         "vulnerability_threshold": None,
+                        f"vulnerability_threshold_vs_{self.year1}": None,
+                        "vulnerability_threshold_vs_ndc_unconditional": None,
                         "selected_coverage": None,
                         "selected_density": None,
                         "selected_density_threshold": None,

@@ -297,6 +297,10 @@ with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     "status": result["status"],
                     "auto_threshold": result["auto_threshold"],
                     "vulnerability_threshold": result["vulnerability_threshold"],
+                    f"vulnerability_threshold_vs_{runner.year1}": result[f"vulnerability_threshold_vs_{runner.year1}"],
+                    "vulnerability_threshold_vs_ndc_unconditional": result[
+                        "vulnerability_threshold_vs_ndc_unconditional"
+                    ],
                     "selected_coverage": result["selected_coverage"],
                     "selected_density": result["selected_density"],
                     "selected_density_threshold": result["selected_density_threshold"],
@@ -320,6 +324,8 @@ with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     "status": "error",
                     "auto_threshold": runner.auto_threshold,
                     "vulnerability_threshold": None,
+                    f"vulnerability_threshold_vs_{runner.year1}": None,
+                    "vulnerability_threshold_vs_ndc_unconditional": None,
                     "selected_coverage": None,
                     "selected_density": None,
                     "selected_density_threshold": None,
