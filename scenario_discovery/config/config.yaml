@@ -1,0 +1,17 @@
+run_id: 1773188058
+max_workers: 2
+
+countries:
+  run_all: false
+  selected:
+    - USA
+    - MEX
+
+scenario_discovery_config:
+  top_k: 3
+  extra_features:
+    # - cap_govt_effectiveness
+  auto_threshold: true
+
+rf_discovery_config:
+  n_jobs: 1

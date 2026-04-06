@@ -1,6 +1,7 @@
 import os
 import logging
 import time
+from ast import literal_eval
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -21,8 +22,144 @@ POST_PROCESSED_DATA_DIR = DATA_DIR / "2030_emissions"
 RULES_PATH = ML_DIR / "config" / "variable_projection_rules.json"
 OUTPUT_DIR = SCRIPT_DIR / "scenario_discovery_outputs"
 LOG_PATH = OUTPUT_DIR / "scenario_discovery_batch.log"
-MAX_WORKERS = int(os.getenv("SCENARIO_DISCOVERY_MAX_WORKERS", "2"))
-RF_N_JOBS = int(os.getenv("SCENARIO_DISCOVERY_RF_N_JOBS", "1"))
+CONFIG_PATH = SCRIPT_DIR / "config" / "config.yaml"
+
+
+def parse_config_scalar(value: str):
+    value = value.strip()
+    if not value:
+        return None
+    lowered = value.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    if lowered in {"null", "none"}:
+        return None
+    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+        return literal_eval(value)
+    if value.startswith("[") and value.endswith("]"):
+        return literal_eval(value)
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        return value
+
+
+def strip_yaml_comment(line: str) -> str:
+    quote_char = ""
+    for idx, char in enumerate(line):
+        if char in {"'", '"'} and (idx == 0 or line[idx - 1] != "\\"):
+            quote_char = "" if quote_char == char else char if not quote_char else quote_char
+        if char == "#" and not quote_char:
+            return line[:idx]
+    return line
+
+
+def load_config(config_path: Path) -> dict:
+    try:
+        import yaml
+
+        with config_path.open("r", encoding="utf-8") as file:
+            return yaml.safe_load(file) or {}
+    except ModuleNotFoundError:
+        return load_simple_yaml_config(config_path)
+
+
+def load_simple_yaml_config(config_path: Path) -> dict:
+    """Parse the simple dict/list YAML shape used by this config file."""
+    root: dict = {}
+    stack: list[tuple[int, dict]] = [(-1, root)]
+    lines = config_path.read_text(encoding="utf-8").splitlines()
+    idx = 0
+
+    while idx < len(lines):
+        raw_line = strip_yaml_comment(lines[idx]).rstrip()
+        idx += 1
+        if not raw_line.strip():
+            continue
+
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        line = raw_line.strip()
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        parent = stack[-1][1]
+
+        if line.startswith("- "):
+            raise ValueError(f"Unexpected list item without a key in {config_path}: {raw_line}")
+
+        key, separator, raw_value = line.partition(":")
+        if not separator:
+            raise ValueError(f"Invalid config line in {config_path}: {raw_line}")
+        key = key.strip()
+        raw_value = raw_value.strip()
+
+        if raw_value:
+            parent[key] = parse_config_scalar(raw_value)
+            continue
+
+        list_values: list = []
+        child: dict | list
+        lookahead = idx
+        while lookahead < len(lines):
+            next_line = strip_yaml_comment(lines[lookahead]).rstrip()
+            if next_line.strip():
+                next_indent = len(next_line) - len(next_line.lstrip(" "))
+                if next_indent > indent and next_line.strip().startswith("- "):
+                    child = list_values
+                    break
+                child = {}
+                break
+            lookahead += 1
+        else:
+            child = {}
+
+        if isinstance(child, list):
+            while idx < len(lines):
+                list_line = strip_yaml_comment(lines[idx]).rstrip()
+                if not list_line.strip():
+                    idx += 1
+                    continue
+                list_indent = len(list_line) - len(list_line.lstrip(" "))
+                if list_indent <= indent:
+                    break
+                stripped = list_line.strip()
+                if not stripped.startswith("- "):
+                    raise ValueError(f"Only scalar lists are supported in {config_path}: {list_line}")
+                list_values.append(parse_config_scalar(stripped[2:]))
+                idx += 1
+            parent[key] = list_values
+        else:
+            parent[key] = child
+            stack.append((indent, child))
+
+    return root
+
+
+def get_required_section(config: dict, section_name: str) -> dict:
+    section = config.get(section_name)
+    if not isinstance(section, dict):
+        raise ValueError(f"Missing or invalid '{section_name}' section in {CONFIG_PATH}")
+    return section
+
+
+def resolve_countries(available_countries: list[str], country_config: dict) -> list[str]:
+    run_all = country_config.get("run_all", True)
+    selected_countries = country_config.get("selected", [])
+    if run_all:
+        return sorted(available_countries)
+
+    if not isinstance(selected_countries, list) or not selected_countries:
+        raise ValueError("Set countries.run_all to true or provide a non-empty countries.selected list.")
+
+    normalized_available = {country.upper(): country for country in available_countries}
+    requested = [str(country).upper() for country in selected_countries]
+    missing = [country for country in requested if country not in normalized_available]
+    if missing:
+        raise ValueError(f"Configured countries are not available in the data: {missing}")
+    return [normalized_available[country] for country in requested]
 
 
 def configure_logging() -> None:
@@ -95,34 +232,50 @@ def build_reports(summary_rows: list[dict], output_dir: Path) -> dict[str, pd.Da
         "top_variable_frequency_report": feature_frequency_df,
     }
 
-# Load the data
-RUN_ID = 1773188058
-df_all = pd.read_parquet(POST_PROCESSED_DATA_DIR / f"post_processed_projected_emissions_{RUN_ID}.parquet")
-ensemble_df_all = pd.read_parquet(ENSEMBLE_DATA_DIR / f"ensemble_arima_{RUN_ID}.parquet")
+config = load_config(CONFIG_PATH)
+scenario_discovery_config = get_required_section(config, "scenario_discovery_config")
+rf_discovery_config = config.get("rf_discovery_config", {})
+countries_config = config.get("countries", {"run_all": True, "selected": []})
+if not isinstance(rf_discovery_config, dict):
+    raise ValueError(f"Invalid 'rf_discovery_config' section in {CONFIG_PATH}")
+if not isinstance(countries_config, dict):
+    raise ValueError(f"Invalid 'countries' section in {CONFIG_PATH}")
+rf_discovery_config = {"n_jobs": 1, **rf_discovery_config}
 
-available_countries = df_all["iso_alpha_3"].unique()
+run_id = config.get("run_id")
+if run_id is None:
+    raise ValueError(f"Missing 'run_id' in {CONFIG_PATH}")
+max_workers = int(config.get("max_workers", 2))
+rf_n_jobs = int(rf_discovery_config.get("n_jobs", 1))
+if max_workers < 1:
+    raise ValueError(f"'max_workers' must be at least 1 in {CONFIG_PATH}")
+
+df_all = pd.read_parquet(POST_PROCESSED_DATA_DIR / f"post_processed_projected_emissions_{run_id}.parquet")
+ensemble_df_all = pd.read_parquet(ENSEMBLE_DATA_DIR / f"ensemble_arima_{run_id}.parquet")
+
+available_countries = df_all["iso_alpha_3"].dropna().unique().tolist()
+countries_to_run = resolve_countries(available_countries, countries_config)
 
 runner = ScenarioDiscoveryBatchRunner(
     projected_df=df_all,
     ensemble_df=ensemble_df_all,
     rules_path=RULES_PATH,
-    top_k=2,
-    extra_features=["cap_govt_effectiveness"],
-    auto_threshold=True,
-    rf_discovery=RandomForestDiscovery(n_jobs=RF_N_JOBS),
+    **scenario_discovery_config,
+    rf_discovery=RandomForestDiscovery(**rf_discovery_config),
 )
 
 configure_logging()
 logging.info("Amount of available countries in the data: %s", len(available_countries))
-logging.info("Running scenario discovery with max_workers=%s", MAX_WORKERS)
-logging.info("Running random forest with n_jobs=%s per country", RF_N_JOBS)
+logging.info("Amount of configured countries to run: %s", len(countries_to_run))
+logging.info("Running scenario discovery with max_workers=%s", max_workers)
+logging.info("Running random forest with n_jobs=%s per country", rf_n_jobs)
 
 summary_rows: list[dict] = []
 completed = 0
-total = len(available_countries)
+total = len(countries_to_run)
 overall_started_at = time.perf_counter()
 
-with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+with ThreadPoolExecutor(max_workers=max_workers) as executor:
     future_to_country = {
         executor.submit(
             run_country_with_logging,
@@ -130,7 +283,7 @@ with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             country,
             OUTPUT_DIR,
         ): country
-        for country in available_countries
+        for country in countries_to_run
     }
 
     for future in as_completed(future_to_country):
