@@ -1,8 +1,7 @@
-import os
 import logging
+import os
 import time
 from ast import literal_eval
-from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -11,7 +10,12 @@ import pandas as pd
 
 matplotlib.use("Agg")
 
-from utils.utils import RandomForestDiscovery, ScenarioDiscoveryBatchRunner
+from utils.utils import (
+    RandomForestDiscovery,
+    ScenarioDiscoveryBatchRunner,
+    build_feature_combination_frequency_report,
+    build_top_variable_frequency_report,
+)
 
 SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 PARENT_DIR = SCRIPT_DIR.parent
@@ -198,38 +202,23 @@ def run_country_with_logging(
 
 def build_reports(summary_rows: list[dict], output_dir: Path) -> dict[str, pd.DataFrame]:
     summary_df = pd.DataFrame(summary_rows).sort_values("country").reset_index(drop=True)
-    feature_counter: Counter[str] = Counter()
-    feature_countries: defaultdict[str, list[str]] = defaultdict(list)
-
-    for row in summary_rows:
-        if row["status"] != "success":
-            continue
-        selected_top_features = [feature for feature in row["selected_top_features"].split("|") if feature]
-        for feature in selected_top_features:
-            feature_counter[feature] += 1
-            feature_countries[feature].append(row["country"])
-
-    feature_frequency_df = pd.DataFrame(
-        [
-            {
-                "feature": feature,
-                "count": count,
-                "countries": "|".join(sorted(feature_countries[feature])),
-            }
-            for feature, count in feature_counter.most_common()
-        ]
-    )
+    feature_frequency_df = build_top_variable_frequency_report(summary_rows)
+    feature_combination_frequency_df = build_feature_combination_frequency_report(summary_rows)
 
     summary_path = output_dir / "country_run_summary.csv"
     feature_frequency_path = output_dir / "top_variable_frequency_report.csv"
+    feature_combination_frequency_path = output_dir / "top_variable_combination_frequency_report.csv"
     summary_df.to_csv(summary_path, index=False)
     feature_frequency_df.to_csv(feature_frequency_path, index=False)
+    feature_combination_frequency_df.to_csv(feature_combination_frequency_path, index=False)
     logging.info("Wrote summary report to %s", summary_path)
     logging.info("Wrote feature frequency report to %s", feature_frequency_path)
+    logging.info("Wrote feature combination frequency report to %s", feature_combination_frequency_path)
 
     return {
         "country_run_summary": summary_df,
         "top_variable_frequency_report": feature_frequency_df,
+        "top_variable_combination_frequency_report": feature_combination_frequency_df,
     }
 
 config = load_config(CONFIG_PATH)

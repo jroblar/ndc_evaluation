@@ -35,7 +35,146 @@ except Exception:
 
 
 DEFAULT_NDC_REFERENCE_PATH = Path(__file__).resolve().parents[2] / "data" / "processed_data" / "ndc_reference.csv"
+DEFAULT_INCOME_LEVEL_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "raw_data" / "income_level_data" / "2025_wb_income_level_class.xlsx"
+)
 NDC_UNCONDITIONAL_COL = "ndc_unconditional"
+
+
+def slugify_report_col(value: str) -> str:
+    return (
+        str(value)
+        .strip()
+        .lower()
+        .replace("&", "and")
+        .replace("/", "_")
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
+
+
+def load_income_level_map(
+    income_level_path: str | Path = DEFAULT_INCOME_LEVEL_PATH,
+    iso_col: str = "iso_alpha_3",
+    income_group_col: str = "income_group",
+) -> dict[str, str]:
+    income_level_path = Path(income_level_path)
+    if not income_level_path.exists():
+        raise FileNotFoundError(f"Income level reference file not found: {income_level_path}")
+
+    try:
+        income_df = pd.read_excel(income_level_path)
+    except ImportError:
+        import re
+        import zipfile
+        import xml.etree.ElementTree as ET
+
+        ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        with zipfile.ZipFile(income_level_path) as workbook:
+            shared_strings = []
+            shared_strings_xml = ET.fromstring(workbook.read("xl/sharedStrings.xml"))
+            for string_item in shared_strings_xml.findall("a:si", ns):
+                shared_strings.append(
+                    "".join(
+                        text_node.text or ""
+                        for text_node in string_item.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")
+                    )
+                )
+
+            sheet_xml = ET.fromstring(workbook.read("xl/worksheets/sheet1.xml"))
+            rows = []
+            for row in sheet_xml.findall(".//a:sheetData/a:row", ns):
+                values = []
+                for cell in row.findall("a:c", ns):
+                    cell_ref = cell.get("r", "")
+                    col_letters = re.sub(r"\\d", "", cell_ref)
+                    col_idx = 0
+                    for char in col_letters:
+                        col_idx = col_idx * 26 + ord(char.upper()) - ord("A") + 1
+                    while len(values) < max(col_idx - 1, 0):
+                        values.append(None)
+
+                    value_node = cell.find("a:v", ns)
+                    if value_node is None:
+                        values.append(None)
+                    elif cell.get("t") == "s":
+                        values.append(shared_strings[int(value_node.text)])
+                    else:
+                        values.append(value_node.text)
+                rows.append(values)
+        income_df = pd.DataFrame(rows[1:], columns=rows[0])
+
+    missing_cols = [col for col in [iso_col, income_group_col] if col not in income_df.columns]
+    if missing_cols:
+        raise ValueError(f"Income level reference file is missing required columns: {missing_cols}")
+
+    income_df = income_df[[iso_col, income_group_col]].dropna(subset=[iso_col, income_group_col]).copy()
+    income_df[iso_col] = income_df[iso_col].astype(str).str.upper()
+    income_df[income_group_col] = income_df[income_group_col].astype(str)
+    return dict(zip(income_df[iso_col], income_df[income_group_col]))
+
+
+def parse_feature_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [feature for feature in value.split("|") if feature]
+    if isinstance(value, (list, tuple, set)):
+        return [str(feature) for feature in value if str(feature)]
+    return []
+
+
+def add_income_group_country_fields(
+    row: dict[str, Any],
+    country_groups: dict[str, list[str]],
+    income_groups: list[str],
+) -> dict[str, Any]:
+    for income_group in income_groups:
+        countries = country_groups.get(income_group, [])
+        row[f"{slugify_report_col(income_group)}_countries"] = "|".join(sorted(countries))
+    row["unclassified_countries"] = "|".join(sorted(country_groups.get("unclassified", [])))
+    return row
+
+
+def build_top_variable_frequency_report(
+    summary_rows: list[dict[str, Any]],
+    income_level_path: str | Path = DEFAULT_INCOME_LEVEL_PATH,
+) -> pd.DataFrame:
+    income_level_by_country = load_income_level_map(income_level_path)
+    income_groups = sorted(set(income_level_by_country.values()))
+    feature_counter: Counter[str] = Counter()
+    feature_income_countries: defaultdict[str, defaultdict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+
+    for row in summary_rows:
+        if row["status"] != "success":
+            continue
+        country = str(row["country"]).upper()
+        income_group = income_level_by_country.get(country, "unclassified")
+        for feature in parse_feature_list(row["selected_top_features"]):
+            feature_counter[feature] += 1
+            feature_income_countries[feature][income_group].append(country)
+
+    report_rows = []
+    for feature, count in feature_counter.most_common():
+        report_row = {"feature": feature, "count": count}
+        report_rows.append(add_income_group_country_fields(report_row, feature_income_countries[feature], income_groups))
+    return pd.DataFrame(report_rows)
+
+
+def build_feature_combination_frequency_report(summary_rows: list[dict[str, Any]]) -> pd.DataFrame:
+    combination_counter: Counter[str] = Counter()
+    for row in summary_rows:
+        if row["status"] != "success":
+            continue
+        selected_top_features = sorted(parse_feature_list(row["selected_top_features"]))
+        if not selected_top_features:
+            continue
+        combination_counter["|".join(selected_top_features)] += 1
+
+    return pd.DataFrame(
+        [
+            {"feature_combination": feature_combination, "count": count}
+            for feature_combination, count in combination_counter.most_common()
+        ]
+    )
 
 
 @dataclass
@@ -1460,8 +1599,6 @@ class ScenarioDiscoveryBatchRunner:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         summary_rows: list[dict[str, Any]] = []
-        feature_counter: Counter[str] = Counter()
-        feature_countries: defaultdict[str, list[str]] = defaultdict(list)
 
         for country in countries:
             try:
@@ -1494,9 +1631,6 @@ class ScenarioDiscoveryBatchRunner:
                         "future_distribution_plot_path": result["future_distribution_plot_path"],
                     }
                 )
-                for feature in result["selected_top_features"]:
-                    feature_counter[feature] += 1
-                    feature_countries[feature].append(country)
             except Exception as exc:
                 summary_rows.append(
                     {
@@ -1523,23 +1657,18 @@ class ScenarioDiscoveryBatchRunner:
                     raise
 
         summary_df = pd.DataFrame(summary_rows)
-        feature_frequency_df = pd.DataFrame(
-            [
-                {
-                    "feature": feature,
-                    "count": count,
-                    "countries": "|".join(sorted(feature_countries[feature])),
-                }
-                for feature, count in feature_counter.most_common()
-            ]
-        )
+        feature_frequency_df = build_top_variable_frequency_report(summary_rows)
+        feature_combination_frequency_df = build_feature_combination_frequency_report(summary_rows)
 
         summary_path = output_dir / "country_run_summary.csv"
         feature_frequency_path = output_dir / "top_variable_frequency_report.csv"
+        feature_combination_frequency_path = output_dir / "top_variable_combination_frequency_report.csv"
         summary_df.to_csv(summary_path, index=False)
         feature_frequency_df.to_csv(feature_frequency_path, index=False)
+        feature_combination_frequency_df.to_csv(feature_combination_frequency_path, index=False)
 
         return {
             "country_run_summary": summary_df,
             "top_variable_frequency_report": feature_frequency_df,
+            "top_variable_combination_frequency_report": feature_combination_frequency_df,
         }
