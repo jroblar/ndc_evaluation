@@ -205,7 +205,7 @@ class VulnerabilityAnalyzer:
         markers = markers or {0: "o", 1: "X"}
 
         if title is None:
-            title = f"{x_col} vs {y_col} by {vuln_col}"
+            title = f"Vulnerability Indicator"
 
         plt.figure(figsize=(8, 6))
         for v in [0, 1]:
@@ -766,12 +766,23 @@ class ScenarioDiscoveryOptimizer:
         popsize: int = 200,
         generations: int = 200,
         seed: int = 55555,
+        target_density: float = 0.85,
+        min_density: float = 0.60,
+        density_step: float = 0.05,
     ) -> None:
         self.lower = lower
         self.upper = upper
         self.popsize = popsize
         self.generations = generations
         self.seed = seed
+        self.target_density = target_density
+        self.min_density = min_density
+        self.density_step = density_step
+
+        if not 0 <= self.min_density <= self.target_density <= 1:
+            raise ValueError("Expected 0 <= min_density <= target_density <= 1.")
+        if self.density_step <= 0:
+            raise ValueError("density_step must be positive.")
 
     @staticmethod
     def box_stats_multi(
@@ -829,6 +840,42 @@ class ScenarioDiscoveryOptimizer:
                 cmps.append("<" if corr < 0 else ">")
         return cmps
 
+    def density_thresholds(self) -> list[float]:
+        thresholds = []
+        threshold = self.target_density
+        while threshold >= self.min_density - 1e-12:
+            thresholds.append(round(threshold, 10))
+            threshold -= self.density_step
+        return thresholds
+
+    def select_best_result(self, optimization_results: pd.DataFrame) -> pd.DataFrame:
+        if optimization_results.empty:
+            return optimization_results.copy()
+
+        results = optimization_results.copy()
+        results["selected_density_threshold"] = np.nan
+        results["selected_solution"] = False
+
+        selected_idx = None
+        selected_threshold = np.nan
+        for threshold in self.density_thresholds():
+            candidates = results[results["density"] >= threshold]
+            if candidates.empty:
+                continue
+            selected_idx = candidates.sort_values(["coverage", "density"], ascending=False).index[0]
+            selected_threshold = threshold
+            break
+
+        if selected_idx is None:
+            selected_idx = results.sort_values(["density", "coverage"], ascending=False).index[0]
+
+        results.loc[selected_idx, "selected_density_threshold"] = selected_threshold
+        results.loc[selected_idx, "selected_solution"] = True
+
+        selected = results.loc[[selected_idx]]
+        remaining = results.drop(index=selected_idx).sort_values(["coverage", "density"], ascending=False)
+        return pd.concat([selected, remaining], axis=0).reset_index(drop=True)
+
     def optimize(
         self,
         merged_df: pd.DataFrame,
@@ -861,7 +908,7 @@ class ScenarioDiscoveryOptimizer:
             )
 
         results["comparators"] = [cmp_selected] * len(results)
-        results = results.sort_values(["coverage", "density"], ascending=False).reset_index(drop=True)
+        results = self.select_best_result(results)
         return pt, results, cmp_selected
 
     def nsga2_optimize_nd(
