@@ -564,9 +564,27 @@ class RandomForestDiscovery:
 
 
 class TrajectoryAggregator:
-    def __init__(self, rules_path: str | Path) -> None:
+    VALID_AGGREGATION_MODES = {"full", "pct_change"}
+
+    def __init__(
+        self,
+        rules_path: str | Path,
+        aggregation_mode: str = "full",
+        start_year: int | str = 2022,
+        end_year: int | str = 2030,
+    ) -> None:
         self.rules_path = Path(rules_path)
         self.category_map, self.prefix_rules, self.default_category = self.load_projection_rulebook(self.rules_path)
+        self.aggregation_mode = self._validate_aggregation_mode(aggregation_mode)
+        self.start_year = int(start_year)
+        self.end_year = int(end_year)
+
+    @classmethod
+    def _validate_aggregation_mode(cls, aggregation_mode: str) -> str:
+        if aggregation_mode not in cls.VALID_AGGREGATION_MODES:
+            valid_modes = ", ".join(sorted(cls.VALID_AGGREGATION_MODES))
+            raise ValueError(f"Unsupported aggregation_mode '{aggregation_mode}'. Expected one of: {valid_modes}.")
+        return aggregation_mode
 
     @staticmethod
     def load_projection_rulebook(rules_path: str | Path):
@@ -663,18 +681,80 @@ class TrajectoryAggregator:
 
         return row
 
+    def summarize_pct_change(
+        self,
+        group: pd.DataFrame,
+        value_cols: list[str],
+        group_col: str = "future_id",
+        keep_country_col: str = "iso_alpha_3",
+        year_col: str = "year",
+    ) -> dict[str, Any]:
+        group = group.sort_values(year_col)
+        numeric_years = pd.to_numeric(group[year_col], errors="coerce")
+        row: dict[str, Any] = {
+            group_col: group[group_col].iloc[0],
+            keep_country_col: group[keep_country_col].iloc[0],
+            "year_start": self.start_year,
+            "year_end": self.end_year,
+            "n_years": int(numeric_years.nunique()),
+        }
+
+        start_rows = group[numeric_years == self.start_year]
+        end_rows = group[numeric_years == self.end_year]
+        if start_rows.empty or end_rows.empty:
+            return row
+
+        start_row = start_rows.iloc[-1]
+        end_row = end_rows.iloc[-1]
+
+        for col in value_cols:
+            category = self.resolve_category(col, self.category_map, self.prefix_rules, self.default_category)
+            start_value = pd.to_numeric(start_row.get(col), errors="coerce")
+            end_value = pd.to_numeric(end_row.get(col), errors="coerce")
+            if pd.isna(start_value) or pd.isna(end_value):
+                continue
+
+            start_value = float(start_value)
+            end_value = float(end_value)
+            prefix = f"{col}__"
+            row[prefix + "start"] = start_value
+            row[prefix + "last"] = end_value
+            row[prefix + "delta"] = end_value - start_value
+
+            if category in {"binary", "cumulative_binary"}:
+                row[prefix + "change"] = end_value - start_value
+            else:
+                row[prefix + "pct_change"] = (
+                    ((end_value - start_value) / abs(start_value)) * 100.0 if start_value != 0 else np.nan
+                )
+
+        return row
+
     def aggregate(
         self,
         ensemble_df: pd.DataFrame,
         group_col: str = "future_id",
         keep_country_col: str = "iso_alpha_3",
         year_col: str = "year",
+        aggregation_mode: str | None = None,
     ) -> pd.DataFrame:
         id_cols = {group_col, keep_country_col, year_col}
         value_cols = [col for col in ensemble_df.columns if col not in id_cols]
+        mode = self._validate_aggregation_mode(aggregation_mode or self.aggregation_mode)
         aggregated_rows = []
         for _, group in ensemble_df.groupby(group_col, sort=False):
-            aggregated_rows.append(self.summarize_trajectory(group, value_cols))
+            if mode == "pct_change":
+                aggregated_rows.append(
+                    self.summarize_pct_change(
+                        group,
+                        value_cols,
+                        group_col=group_col,
+                        keep_country_col=keep_country_col,
+                        year_col=year_col,
+                    )
+                )
+            else:
+                aggregated_rows.append(self.summarize_trajectory(group, value_cols))
         return pd.DataFrame(aggregated_rows)
 
 
@@ -1039,6 +1119,7 @@ class ScenarioDiscoveryBatchRunner:
         extra_features: list[str] | None = None,
         non_modeling_cols: list[str] | None = None,
         emission_cols: list[str] | None = None,
+        trajectory_aggregation_mode: str = "full",
         rf_discovery: RandomForestDiscovery | None = None,
         optimizer: ScenarioDiscoveryOptimizer | None = None,
     ) -> None:
@@ -1076,7 +1157,12 @@ class ScenarioDiscoveryBatchRunner:
         ]
         self.rf_discovery = rf_discovery or RandomForestDiscovery()
         self.optimizer = optimizer or ScenarioDiscoveryOptimizer()
-        self.trajectory_aggregator = TrajectoryAggregator(self.rules_path)
+        self.trajectory_aggregator = TrajectoryAggregator(
+            self.rules_path,
+            aggregation_mode=trajectory_aggregation_mode,
+            start_year=self.year1,
+            end_year=self.year2,
+        )
 
     @staticmethod
     def _prepare_feature_importance(feature_importance_df: pd.DataFrame) -> pd.DataFrame:
