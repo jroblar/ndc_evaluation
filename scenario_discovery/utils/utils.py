@@ -159,22 +159,38 @@ def build_top_variable_frequency_report(
     return pd.DataFrame(report_rows)
 
 
-def build_feature_combination_frequency_report(summary_rows: list[dict[str, Any]]) -> pd.DataFrame:
+def build_feature_combination_frequency_report(
+    summary_rows: list[dict[str, Any]],
+    income_level_path: str | Path = DEFAULT_INCOME_LEVEL_PATH,
+) -> pd.DataFrame:
+    income_level_by_country = load_income_level_map(income_level_path)
+    income_groups = sorted(set(income_level_by_country.values()))
     combination_counter: Counter[str] = Counter()
+    combination_income_countries: defaultdict[str, defaultdict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+
     for row in summary_rows:
         if row["status"] != "success":
             continue
+        country = str(row["country"]).upper()
+        income_group = income_level_by_country.get(country, "unclassified")
         selected_top_features = sorted(parse_feature_list(row["selected_top_features"]))
         if not selected_top_features:
             continue
-        combination_counter["|".join(selected_top_features)] += 1
+        feature_combination = "|".join(selected_top_features)
+        combination_counter[feature_combination] += 1
+        combination_income_countries[feature_combination][income_group].append(country)
 
-    return pd.DataFrame(
-        [
-            {"feature_combination": feature_combination, "count": count}
-            for feature_combination, count in combination_counter.most_common()
-        ]
-    )
+    report_rows = []
+    for feature_combination, count in combination_counter.most_common():
+        report_row = {"feature_combination": feature_combination, "count": count}
+        report_rows.append(
+            add_income_group_country_fields(
+                report_row,
+                combination_income_countries[feature_combination],
+                income_groups,
+            )
+        )
+    return pd.DataFrame(report_rows)
 
 
 @dataclass
