@@ -34,6 +34,10 @@ except Exception:
     PYMOO_OK = False
 
 
+DEFAULT_NDC_REFERENCE_PATH = Path(__file__).resolve().parents[2] / "data" / "processed_data" / "ndc_reference.csv"
+NDC_UNCONDITIONAL_COL = "ndc_unconditional"
+
+
 @dataclass
 class RandomForestDiscoveryResult:
     rf_models: dict[str, Pipeline]
@@ -101,8 +105,12 @@ class VulnerabilityAnalyzer:
         value_col: str,
         id_cols: tuple[str, str] = ("future_id", "iso_alpha_3"),
         auto_threshold: bool = False,
+        ndc_reference_path: str | Path = DEFAULT_NDC_REFERENCE_PATH,
+        ndc_iso_col: str = "ISO",
+        ndc_value_col: str = "Unconditional",
+        ndc_output_col: str = NDC_UNCONDITIONAL_COL,
     ) -> pd.DataFrame:
-        return VulnerabilityAnalyzer.compute_vulnerability_indicator(
+        emissions_change_df = VulnerabilityAnalyzer.compute_vulnerability_indicator(
             df=df,
             year1=year1,
             year2=year2,
@@ -110,6 +118,27 @@ class VulnerabilityAnalyzer:
             id_cols=id_cols,
             auto_threshold=auto_threshold,
         )
+        ndc_reference_path = Path(ndc_reference_path)
+        if not ndc_reference_path.exists():
+            raise FileNotFoundError(f"NDC reference file not found: {ndc_reference_path}")
+
+        ndc_reference = pd.read_csv(ndc_reference_path)
+        missing_cols = [col for col in [ndc_iso_col, ndc_value_col] if col not in ndc_reference.columns]
+        if missing_cols:
+            raise ValueError(f"NDC reference file is missing required columns: {missing_cols}")
+
+        country_col = id_cols[1]
+        ndc_targets = (
+            ndc_reference[[ndc_iso_col, ndc_value_col]]
+            .drop_duplicates(subset=[ndc_iso_col])
+            .rename(columns={ndc_iso_col: country_col, ndc_value_col: ndc_output_col})
+        )
+        ndc_targets[country_col] = ndc_targets[country_col].astype(str).str.upper()
+        ndc_targets[ndc_output_col] = pd.to_numeric(ndc_targets[ndc_output_col], errors="coerce")
+
+        out = emissions_change_df.copy()
+        out[country_col] = out[country_col].astype(str).str.upper()
+        return out.merge(ndc_targets, on=country_col, how="left")
 
     @staticmethod
     def merge_ensemble_with_vulnerability(
@@ -236,10 +265,12 @@ class VulnerabilityAnalyzer:
         df_pivot: pd.DataFrame,
         future_col: str = "2030",
         baseline_col: str = "2022",
+        reference_cols: tuple[str, ...] = ("2022", NDC_UNCONDITIONAL_COL),
         bins: int = 30,
         figsize: tuple[int, int] = (8, 4),
         color: str = "tab:blue",
         baseline_color: str = "tab:red",
+        reference_colors: dict[str, str] | None = None,
         kde: bool = False,
         xlabel: str | None = None,
         ylabel: str = "Count",
@@ -257,23 +288,27 @@ class VulnerabilityAnalyzer:
             raise ValueError(f"Column '{baseline_col}' not found in dataframe.")
 
         future_values = pd.to_numeric(df_pivot[future_col], errors="coerce").dropna()
-        baseline_values = pd.to_numeric(df_pivot[baseline_col], errors="coerce").dropna().unique()
 
         if future_values.empty:
             raise ValueError(f"Column '{future_col}' has no valid numeric values to plot.")
-        if len(baseline_values) == 0:
-            raise ValueError(f"Column '{baseline_col}' has no valid numeric values.")
-        if len(baseline_values) > 1:
-            raise ValueError(
-                f"Column '{baseline_col}' contains multiple values; expected a single baseline value, "
-                f"got {len(baseline_values)} unique values."
-            )
 
-        baseline_value = float(baseline_values[0])
+        def get_unique_reference_value(col: str, required: bool = True) -> float | None:
+            values = pd.to_numeric(df_pivot[col], errors="coerce").dropna().unique()
+            if len(values) == 0:
+                if required:
+                    raise ValueError(f"Column '{col}' has no valid numeric values.")
+                return None
+            if len(values) > 1:
+                raise ValueError(
+                    f"Column '{col}' contains multiple values; expected a single reference value, "
+                    f"got {len(values)} unique values."
+                )
+            return float(values[0])
 
         plt.figure(figsize=figsize)
         ax = plt.gca()
         sns.histplot(future_values, bins=bins, color=color, kde=kde, ax=ax, edgecolor="w")
+        baseline_value = get_unique_reference_value(baseline_col)
         ax.axvline(
             baseline_value,
             color=baseline_color,
@@ -281,6 +316,25 @@ class VulnerabilityAnalyzer:
             linewidth=2,
             label=f"{baseline_col} = {baseline_value:.3g}",
         )
+        reference_colors = reference_colors or {
+            "2022": "tab:green",
+            NDC_UNCONDITIONAL_COL: "tab:purple",
+        }
+        plotted_reference_cols = {baseline_col}
+        for reference_col in reference_cols:
+            if reference_col in plotted_reference_cols or reference_col not in df_pivot.columns:
+                continue
+            reference_value = get_unique_reference_value(reference_col, required=False)
+            if reference_value is None:
+                continue
+            ax.axvline(
+                reference_value,
+                color=reference_colors.get(reference_col, "black"),
+                linestyle="--",
+                linewidth=2,
+                label=f"{reference_col} = {reference_value:.3g}",
+            )
+            plotted_reference_cols.add(reference_col)
 
         ax.set_xlabel(xlabel or future_col)
         ax.set_ylabel(ylabel)
@@ -346,6 +400,7 @@ class RandomForestDiscovery:
             "n_years",
             "2022",
             "2030",
+            NDC_UNCONDITIONAL_COL,
         ]
 
         feature_cols = [col for col in merged_df.columns if col not in non_modeling_cols + [target_col]]
@@ -1188,6 +1243,7 @@ class ScenarioDiscoveryBatchRunner:
             "n_years",
             self.year1,
             self.year2,
+            NDC_UNCONDITIONAL_COL,
         ]
         if self.auto_threshold and "vulnerability_threshold" not in self.non_modeling_cols:
             self.non_modeling_cols.append("vulnerability_threshold")
@@ -1243,7 +1299,7 @@ class ScenarioDiscoveryBatchRunner:
         if country_projected_df.empty:
             raise ValueError(f"No projected data found for country '{iso_alpha_3}'.")
 
-        df_pivot = VulnerabilityAnalyzer.compute_vulnerability_indicator(
+        df_pivot = VulnerabilityAnalyzer.compute_emissions_change(
             country_projected_df,
             self.year1,
             self.year2,
