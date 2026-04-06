@@ -410,6 +410,10 @@ class RandomForestDiscovery:
 
         X_target = X_all.loc[valid_mask].copy()
         y_target = y.loc[valid_mask].astype(int)
+        all_nan_feature_cols = X_target.columns[X_target.notna().sum(axis=0) == 0].tolist()
+        if all_nan_feature_cols:
+            X_target = X_target.drop(columns=all_nan_feature_cols)
+            feature_cols = [col for col in feature_cols if col not in all_nan_feature_cols]
 
         rf_models: dict[str, Pipeline] = {}
         rf_training_rows: list[dict[str, Any]] = []
@@ -422,6 +426,9 @@ class RandomForestDiscovery:
                     "n_rows": int(len(y_target)),
                     "class_0": int((y_target == 0).sum()),
                     "class_1": int((y_target == 1).sum()),
+                    "n_features": int(len(feature_cols)),
+                    "n_all_nan_features_dropped": int(len(all_nan_feature_cols)),
+                    "all_nan_features_dropped": "|".join(all_nan_feature_cols),
                     "status": "skipped_insufficient_rows_or_classes",
                 }
             )
@@ -458,6 +465,8 @@ class RandomForestDiscovery:
                     "class_1": int((y_target == 1).sum()),
                     "status": "trained",
                     "n_features": int(len(feature_cols)),
+                    "n_all_nan_features_dropped": int(len(all_nan_feature_cols)),
+                    "all_nan_features_dropped": "|".join(all_nan_feature_cols),
                     "baseline_accuracy": baseline_accuracy,
                     "test_accuracy": float(accuracy_score(y_test, y_pred)),
                     "test_balanced_accuracy": float(balanced_accuracy_score(y_test, y_pred)),
