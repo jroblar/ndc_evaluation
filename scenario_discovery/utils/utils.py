@@ -4,6 +4,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
+from threading import Lock
 from typing import Any
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -460,8 +461,7 @@ class VulnerabilityAnalyzer:
                 )
             return float(values[0])
 
-        plt.figure(figsize=figsize)
-        ax = plt.gca()
+        fig, ax = plt.subplots(figsize=figsize)
         sns.histplot(future_values, bins=bins, color=color, kde=kde, ax=ax, edgecolor="w")
         baseline_value = get_unique_reference_value(baseline_col)
         ax.axvline(
@@ -495,15 +495,15 @@ class VulnerabilityAnalyzer:
         ax.set_ylabel(ylabel)
         ax.set_title(title or f"Distribution of {future_col} with {baseline_col} reference")
         ax.legend(loc="best")
-        plt.tight_layout()
+        fig.tight_layout()
 
         if save_path is not None:
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-            plt.gcf().savefig(save_path, dpi=300, bbox_inches="tight")
+            fig.savefig(save_path, dpi=300, bbox_inches="tight")
         if show:
             plt.show()
         if close:
-            plt.close(plt.gcf())
+            plt.close(fig)
         return ax
 
 
@@ -1371,6 +1371,8 @@ class ScenarioDiscoveryOptimizer:
 
 
 class ScenarioDiscoveryBatchRunner:
+    _plot_lock = Lock()
+
     def __init__(
         self,
         projected_df: pd.DataFrame,
@@ -1539,37 +1541,39 @@ class ScenarioDiscoveryBatchRunner:
             vuln_col=self.target_col,
         )
 
-        optimization_results_path = country_output_dir / "optimization_results.csv"
-        plot_path = country_output_dir / "boxed_scatter.png"
-        future_distribution_plot_path = country_output_dir / "future_distribution_with_baseline.png"
-        feature_importance_path = country_output_dir / "feature_importance.csv"
-        training_summary_path = country_output_dir / "rf_training_summary.csv"
+        optimization_results_path = country_output_dir / f"{iso_alpha_3}_optimization_results.csv"
+        plot_path = country_output_dir / f"{iso_alpha_3}_boxed_scatter.png"
+        future_distribution_plot_path = country_output_dir / f"{iso_alpha_3}_future_distribution_with_baseline.png"
+        feature_importance_path = country_output_dir / f"{iso_alpha_3}_feature_importance.csv"
+        training_summary_path = country_output_dir / f"{iso_alpha_3}_rf_training_summary.csv"
 
         optimization_results.to_csv(optimization_results_path, index=False)
         feature_importance_df.to_csv(feature_importance_path, index=False)
         rf_result.training_summary.to_csv(training_summary_path, index=False)
 
-        VulnerabilityAnalyzer.plot_future_distribution_with_baseline(
-            df_pivot,
-            future_col=self.year2,
-            baseline_col="vulnerability_threshold" if self.auto_threshold else self.year1,
-            title=(
-                f"{iso_alpha_3}: Distribution of {self.year2} with "
-                f"{'vulnerability_threshold' if self.auto_threshold else self.year1} baseline"
-            ),
-            save_path=future_distribution_plot_path,
-            show=False,
-            close=True,
-        )
+        with self._plot_lock:
+            VulnerabilityAnalyzer.plot_future_distribution_with_baseline(
+                df_pivot,
+                future_col=self.year2,
+                baseline_col="vulnerability_threshold" if self.auto_threshold else self.year1,
+                title=(
+                    f"{iso_alpha_3}: Distribution of {self.year2} with "
+                    f"{'vulnerability_threshold' if self.auto_threshold else self.year1} baseline"
+                ),
+                save_path=future_distribution_plot_path,
+                show=False,
+                close=True,
+            )
 
-        plot_info = self.optimizer.plot_boxed_scatter_from_optimization_result(
-            pt,
-            optimization_results,
-            row_idx=boxed_plot_row_idx,
-            save_path=plot_path,
-            show=False,
-            close=True,
-        )
+            plot_info = self.optimizer.plot_boxed_scatter_from_optimization_result(
+                pt,
+                optimization_results,
+                row_idx=boxed_plot_row_idx,
+                title=f"{iso_alpha_3}: Optimized Box Scenario Discovery",
+                save_path=plot_path,
+                show=False,
+                close=True,
+            )
         selected_result_rows = (
             optimization_results[optimization_results["selected_solution"]]
             if "selected_solution" in optimization_results.columns
