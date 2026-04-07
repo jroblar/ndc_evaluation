@@ -1,0 +1,28 @@
+run_id: 1773188058
+max_workers: 4
+
+countries:
+  run_all: true
+  selected:
+    - USA
+    - MEX
+
+scenario_discovery_config:
+  top_k: 3
+  trajectory_aggregation_mode: pct_change
+  extra_features: []
+  auto_threshold: true
+  emission_cols:
+    - x_log_signed_con_edgar_ghg_mt
+    - emissions_anchor_2022
+    - years_since_2022
+    - trend_year_interaction
+    - em_lag_1y
+    - em_trend_3y
+    - em_trend_5y
+    - em_volatility_5y
+    - em_acceleration
+    - x_log_signed_con_demand
+
+rf_discovery_config:
+  n_jobs: 1
