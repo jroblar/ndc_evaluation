@@ -2,6 +2,7 @@ from typing import Iterable, List, Optional, Union
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 
 class ProbUtils:
 
@@ -237,5 +238,37 @@ class ProbUtils:
         ax.set_ylim(0, 1)
         plt.grid()
 
+        plt.tight_layout()
+        plt.show()
+    
+    @staticmethod
+    def plot_column_distributions(df, columns, bins=30, kde=True):
+        """
+        Plots histograms for the specified columns in the DataFrame.
+
+        Parameters:
+            df (pd.DataFrame): The input DataFrame.
+            columns (list of str): List of column names to plot.
+            bins (int, optional): Number of bins for the histograms. Defaults to 30.
+
+        Returns:
+            None: Displays the histograms.
+        """
+        n = len(columns)
+        ncols = 3
+        nrows = (n + ncols - 1) // ncols
+        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(5 * ncols, 4 * nrows))
+        axes = axes.flatten()
+
+        for i, col in enumerate(columns):
+            if col in df.columns:
+                sns.histplot(df[col].dropna(), bins=bins, kde=kde, ax=axes[i])
+                axes[i].set_title(f"Distribution of {col}")
+                axes[i].set_xlabel(col)
+                axes[i].set_ylabel("Frequency")
+            else:
+                axes[i].set_visible(False)
+        for j in range(i + 1, len(axes)):
+            axes[j].set_visible(False)
         plt.tight_layout()
         plt.show()
