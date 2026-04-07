@@ -1,8 +1,8 @@
 run_id: 1773188058
-max_workers: 2
+max_workers: 4
 
 countries:
-  run_all: false
+  run_all: true
   selected:
     - USA
     - MEX

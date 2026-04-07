@@ -3,6 +3,7 @@ import os
 import time
 from ast import literal_eval
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -200,14 +201,16 @@ def run_country_with_logging(
     return result
 
 
-def build_reports(summary_rows: list[dict], output_dir: Path) -> dict[str, pd.DataFrame]:
+def build_reports(summary_rows: list[dict], output_dir: Path, run_id: str, n_countries: int) -> dict[str, pd.DataFrame]:
     summary_df = pd.DataFrame(summary_rows).sort_values("country").reset_index(drop=True)
     feature_frequency_df = build_top_variable_frequency_report(summary_rows)
     feature_combination_frequency_df = build_feature_combination_frequency_report(summary_rows)
 
-    summary_path = output_dir / "country_run_summary.csv"
-    feature_frequency_path = output_dir / "top_variable_frequency_report.csv"
-    feature_combination_frequency_path = output_dir / "top_variable_combination_frequency_report.csv"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_prefix = f"{run_id}_{n_countries}_{timestamp}"
+    summary_path = output_dir / f"{report_prefix}_country_run_summary.csv"
+    feature_frequency_path = output_dir / f"{report_prefix}_top_variable_frequency_report.csv"
+    feature_combination_frequency_path = output_dir / f"{report_prefix}_top_variable_combination_frequency_report.csv"
     summary_df.to_csv(summary_path, index=False)
     feature_frequency_df.to_csv(feature_frequency_path, index=False)
     feature_combination_frequency_df.to_csv(feature_combination_frequency_path, index=False)
@@ -336,7 +339,7 @@ with ThreadPoolExecutor(max_workers=max_workers) as executor:
             )
             logging.info("Progress: %s/%s countries completed", completed, total)
 
-reports = build_reports(summary_rows, OUTPUT_DIR)
+reports = build_reports(summary_rows, OUTPUT_DIR, str(run_id), len(countries_to_run))
 successful_runs = sum(row["status"] == "success" for row in summary_rows)
 failed_runs = sum(row["status"] == "error" for row in summary_rows)
 overall_elapsed = time.perf_counter() - overall_started_at
