@@ -987,6 +987,7 @@ class ScenarioDiscoveryOptimizer:
         seed: int = 55555,
         target_density: float = 0.85,
         min_density: float = 0.60,
+        min_coverage: float = 0.60,
         density_step: float = 0.05,
     ) -> None:
         self.lower = lower
@@ -996,10 +997,13 @@ class ScenarioDiscoveryOptimizer:
         self.seed = seed
         self.target_density = target_density
         self.min_density = min_density
+        self.min_coverage = min_coverage
         self.density_step = density_step
 
         if not 0 <= self.min_density <= self.target_density <= 1:
             raise ValueError("Expected 0 <= min_density <= target_density <= 1.")
+        if not 0 <= self.min_coverage <= 1:
+            raise ValueError("Expected 0 <= min_coverage <= 1.")
         if self.density_step <= 0:
             raise ValueError("density_step must be positive.")
 
@@ -1073,12 +1077,16 @@ class ScenarioDiscoveryOptimizer:
 
         results = optimization_results.copy()
         results["selected_density_threshold"] = np.nan
+        results["selected_coverage_threshold"] = np.nan
         results["selected_solution"] = False
 
         selected_idx = None
         selected_threshold = np.nan
         for threshold in self.density_thresholds():
-            candidates = results[results["density"] >= threshold]
+            candidates = results[
+                (results["density"] >= threshold)
+                & (results["coverage"] >= self.min_coverage)
+            ]
             if candidates.empty:
                 continue
             selected_idx = candidates.sort_values(["coverage", "density"], ascending=False).index[0]
@@ -1086,9 +1094,18 @@ class ScenarioDiscoveryOptimizer:
             break
 
         if selected_idx is None:
-            selected_idx = results.sort_values(["density", "coverage"], ascending=False).index[0]
+            candidates = results[results["density"] >= self.min_density]
+            if candidates.empty:
+                candidates = results[results["coverage"] >= self.min_coverage]
+                sort_cols = ["density", "coverage"] if not candidates.empty else ["coverage", "density"]
+            else:
+                sort_cols = ["coverage", "density"]
+            if candidates.empty:
+                candidates = results
+            selected_idx = candidates.sort_values(sort_cols, ascending=False).index[0]
 
         results.loc[selected_idx, "selected_density_threshold"] = selected_threshold
+        results.loc[selected_idx, "selected_coverage_threshold"] = self.min_coverage
         results.loc[selected_idx, "selected_solution"] = True
 
         selected = results.loc[[selected_idx]]
@@ -1550,6 +1567,7 @@ class ScenarioDiscoveryBatchRunner:
         optimization_results.to_csv(optimization_results_path, index=False)
         feature_importance_df.to_csv(feature_importance_path, index=False)
         rf_result.training_summary.to_csv(training_summary_path, index=False)
+        plot_result = optimization_results.iloc[boxed_plot_row_idx]
 
         with self._plot_lock:
             VulnerabilityAnalyzer.plot_future_distribution_with_baseline(
@@ -1569,7 +1587,10 @@ class ScenarioDiscoveryBatchRunner:
                 pt,
                 optimization_results,
                 row_idx=boxed_plot_row_idx,
-                title=f"{iso_alpha_3}: Optimized Box Scenario Discovery",
+                title=(
+                    f"{iso_alpha_3}: Optimized Box for row {boxed_plot_row_idx} | "
+                    f"coverage={plot_result['coverage']:.3f}, density={plot_result['density']:.3f}"
+                ),
                 save_path=plot_path,
                 show=False,
                 close=True,
@@ -1593,7 +1614,9 @@ class ScenarioDiscoveryBatchRunner:
             "selected_coverage": selected_coverage,
             "selected_density": selected_density,
             "selected_density_threshold": selected_result.get("selected_density_threshold", np.nan),
+            "selected_coverage_threshold": selected_result.get("selected_coverage_threshold", np.nan),
             "selected_density_below_min": bool(selected_density < self.optimizer.min_density),
+            "selected_coverage_below_min": bool(selected_coverage < self.optimizer.min_coverage),
             "selected_top_features": selected_top_features,
             "features_for_optimization": features_for_optimization,
             "cmp_selected": cmp_selected,
@@ -1642,7 +1665,9 @@ class ScenarioDiscoveryBatchRunner:
                         "selected_coverage": result["selected_coverage"],
                         "selected_density": result["selected_density"],
                         "selected_density_threshold": result["selected_density_threshold"],
+                        "selected_coverage_threshold": result["selected_coverage_threshold"],
                         "selected_density_below_min": result["selected_density_below_min"],
+                        "selected_coverage_below_min": result["selected_coverage_below_min"],
                         "selected_top_features": "|".join(result["selected_top_features"]),
                         "features_for_optimization": "|".join(result["features_for_optimization"]),
                         "n_optimization_rows": result["n_optimization_rows"],
@@ -1663,7 +1688,9 @@ class ScenarioDiscoveryBatchRunner:
                         "selected_coverage": None,
                         "selected_density": None,
                         "selected_density_threshold": None,
+                        "selected_coverage_threshold": None,
                         "selected_density_below_min": None,
+                        "selected_coverage_below_min": None,
                         "selected_top_features": "",
                         "features_for_optimization": "",
                         "n_optimization_rows": 0,
