@@ -964,12 +964,11 @@ if __name__ == "__main__":
 
     SCRIPT_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
     ROOT_DIR_PATH = os.path.dirname(SCRIPT_DIR_PATH)
-
-    DATA_DIR_PATH = os.path.join(ROOT_DIR_PATH, "data")
-    PROCESSED_DATA_DIR_PATH = os.path.join(DATA_DIR_PATH, "processed_data")
-    OUTPUT_DIR_PATH = os.path.join(SCRIPT_DIR_PATH, "output")
-    ENSEMBLE_DIR_PATH = os.path.join(OUTPUT_DIR_PATH, "ensemble")
-    TRAINING_DIR_PATH = os.path.join(OUTPUT_DIR_PATH, "training")
+    ML_DIR_PATH = os.path.join(ROOT_DIR_PATH, "ml_scripts")
+    ML_OUTPUT_DIR_PATH = os.path.join(ML_DIR_PATH, "output")
+    ARIMA_OUTPUT_DIR_PATH = os.path.join(SCRIPT_DIR_PATH, "output")
+    ENSEMBLE_DIR_PATH = os.path.join(ARIMA_OUTPUT_DIR_PATH, "ensemble")
+    TRAINING_DIR_PATH = os.path.join(ML_OUTPUT_DIR_PATH, "training")
     CONFIG_DIR_PATH = os.path.join(SCRIPT_DIR_PATH, "config")
 
     os.makedirs(ENSEMBLE_DIR_PATH, exist_ok=True)
@@ -982,9 +981,9 @@ if __name__ == "__main__":
             print(exc)
         
     # File names
-    data_to_project = arima_config["data_to_project"]
-    variable_projections_rules_file = arima_config["variable_projections_rules_file"] 
     run_id = arima_config["run_id"]
+    data_to_project = f"training_df_{run_id}.csv"
+    variable_projections_rules_file = arima_config["variable_projections_rules_file"]
     n_scenarios = arima_config["n_scenarios"]
     end_year = arima_config["end_year"]
     
