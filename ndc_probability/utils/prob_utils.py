@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Iterable, List, Optional, Union
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -129,6 +130,7 @@ class ProbUtils:
         conditional_col: str = "meets_ndc_conditional_target",
         bins: int = 20,
         figsize=(10, 4),
+        save_path: str | Path | None = None,
     ):
         """
         Plot side-by-side histograms of NDC meet shares (unconditional vs conditional).
@@ -173,6 +175,9 @@ class ProbUtils:
         axes[1].set_xlim(0, 1)
 
         plt.tight_layout()
+        if save_path is not None:
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.show()
     
     @staticmethod
@@ -213,6 +218,7 @@ class ProbUtils:
         prob_col: str,
         thresholds=None,
         figsize=(6, 4),
+        save_path: str | Path | None = None,
     ):
         """
         Plot share of countries whose probability of meeting NDC >= threshold.
@@ -239,6 +245,9 @@ class ProbUtils:
         plt.grid()
 
         plt.tight_layout()
+        if save_path is not None:
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.show()
     
     @staticmethod

@@ -1187,6 +1187,9 @@ class ScenarioDiscoveryOptimizer:
         highlight_idx: int = 0,
         annotate: bool = True,
         title: str = "Pareto Front: Coverage vs Density",
+        save_path: str | Path | None = None,
+        show: bool = True,
+        close: bool = False,
     ):
         import matplotlib.pyplot as plt
 
@@ -1232,7 +1235,13 @@ class ScenarioDiscoveryOptimizer:
         ax.grid(alpha=0.3)
         ax.legend(loc="best")
         plt.tight_layout()
-        plt.show()
+        if save_path is not None:
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        if show:
+            plt.show()
+        if close:
+            plt.close(fig)
         return ax
 
     @staticmethod
