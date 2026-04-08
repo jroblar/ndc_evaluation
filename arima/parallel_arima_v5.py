@@ -964,7 +964,7 @@ if __name__ == "__main__":
 
     SCRIPT_DIR_PATH = os.path.dirname(os.path.abspath(__file__))
     ROOT_DIR_PATH = os.path.dirname(SCRIPT_DIR_PATH)
-    ML_DIR_PATH = os.path.join(ROOT_DIR_PATH, "ml_scripts")
+    ML_DIR_PATH = os.path.join(ROOT_DIR_PATH, "ml")
     ML_OUTPUT_DIR_PATH = os.path.join(ML_DIR_PATH, "output")
     ARIMA_OUTPUT_DIR_PATH = os.path.join(SCRIPT_DIR_PATH, "output")
     ENSEMBLE_DIR_PATH = os.path.join(ARIMA_OUTPUT_DIR_PATH, "ensemble")
