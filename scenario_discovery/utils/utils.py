@@ -1558,13 +1558,17 @@ class ScenarioDiscoveryBatchRunner:
             vuln_col=self.target_col,
         )
 
+        optimization_input_path = country_output_dir / f"{iso_alpha_3}_optimization_input_table.csv"
         optimization_results_path = country_output_dir / f"{iso_alpha_3}_optimization_results.csv"
         plot_path = country_output_dir / f"{iso_alpha_3}_boxed_scatter.png"
+        future_distribution_input_path = country_output_dir / f"{iso_alpha_3}_future_distribution_input_table.csv"
         future_distribution_plot_path = country_output_dir / f"{iso_alpha_3}_future_distribution_with_baseline.png"
         feature_importance_path = country_output_dir / f"{iso_alpha_3}_feature_importance.csv"
         training_summary_path = country_output_dir / f"{iso_alpha_3}_rf_training_summary.csv"
 
+        pt.to_csv(optimization_input_path, index=False)
         optimization_results.to_csv(optimization_results_path, index=False)
+        df_pivot.to_csv(future_distribution_input_path, index=False)
         feature_importance_df.to_csv(feature_importance_path, index=False)
         rf_result.training_summary.to_csv(training_summary_path, index=False)
         plot_result = optimization_results.iloc[boxed_plot_row_idx]
@@ -1621,8 +1625,10 @@ class ScenarioDiscoveryBatchRunner:
             "features_for_optimization": features_for_optimization,
             "cmp_selected": cmp_selected,
             "n_optimization_rows": int(len(optimization_results)),
+            "optimization_input_path": str(optimization_input_path),
             "optimization_results_path": str(optimization_results_path),
             "boxed_scatter_path": str(plot_path),
+            "future_distribution_input_path": str(future_distribution_input_path),
             "future_distribution_plot_path": str(future_distribution_plot_path),
             "feature_importance_path": str(feature_importance_path),
             "rf_training_summary_path": str(training_summary_path),
@@ -1671,8 +1677,10 @@ class ScenarioDiscoveryBatchRunner:
                         "selected_top_features": "|".join(result["selected_top_features"]),
                         "features_for_optimization": "|".join(result["features_for_optimization"]),
                         "n_optimization_rows": result["n_optimization_rows"],
+                        "optimization_input_path": result["optimization_input_path"],
                         "optimization_results_path": result["optimization_results_path"],
                         "boxed_scatter_path": result["boxed_scatter_path"],
+                        "future_distribution_input_path": result["future_distribution_input_path"],
                         "future_distribution_plot_path": result["future_distribution_plot_path"],
                     }
                 )
@@ -1694,8 +1702,10 @@ class ScenarioDiscoveryBatchRunner:
                         "selected_top_features": "",
                         "features_for_optimization": "",
                         "n_optimization_rows": 0,
+                        "optimization_input_path": "",
                         "optimization_results_path": "",
                         "boxed_scatter_path": "",
+                        "future_distribution_input_path": "",
                         "future_distribution_plot_path": "",
                         "error": str(exc),
                     }

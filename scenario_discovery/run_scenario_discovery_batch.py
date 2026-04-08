@@ -25,7 +25,7 @@ DATA_DIR = ARIMA_DIR / "output"
 ENSEMBLE_DATA_DIR = DATA_DIR / "ensemble"
 POST_PROCESSED_DATA_DIR = DATA_DIR / "postprocessed_ensemble"
 RULES_PATH = ARIMA_DIR / "config" / "variable_projection_rules.json"
-OUTPUT_BASE_DIR = SCRIPT_DIR / "scenario_discovery_outputs"
+OUTPUT_BASE_DIR = SCRIPT_DIR / "output"
 CONFIG_PATH = SCRIPT_DIR / "config" / "config.yaml"
 
 
@@ -239,7 +239,7 @@ rf_n_jobs = int(rf_discovery_config.get("n_jobs", 1))
 if max_workers < 1:
     raise ValueError(f"'max_workers' must be at least 1 in {CONFIG_PATH}")
 
-df_all = pd.read_parquet(POST_PROCESSED_DATA_DIR / f"post_processed_projected_emissions_{run_id}.parquet")
+df_all = pd.read_parquet(POST_PROCESSED_DATA_DIR / f"postprocessed_ensemble_{run_id}.parquet")
 ensemble_df_all = pd.read_parquet(ENSEMBLE_DATA_DIR / f"ensemble_arima_{run_id}.parquet")
 
 available_countries = df_all["iso_alpha_3"].dropna().unique().tolist()
@@ -304,8 +304,10 @@ with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     "selected_top_features": "|".join(result["selected_top_features"]),
                     "features_for_optimization": "|".join(result["features_for_optimization"]),
                     "n_optimization_rows": result["n_optimization_rows"],
+                    "optimization_input_path": result["optimization_input_path"],
                     "optimization_results_path": result["optimization_results_path"],
                     "boxed_scatter_path": result["boxed_scatter_path"],
+                    "future_distribution_input_path": result["future_distribution_input_path"],
                     "future_distribution_plot_path": result["future_distribution_plot_path"],
                     "feature_importance_path": result["feature_importance_path"],
                     "rf_training_summary_path": result["rf_training_summary_path"],
@@ -331,8 +333,10 @@ with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     "selected_top_features": "",
                     "features_for_optimization": "",
                     "n_optimization_rows": 0,
+                    "optimization_input_path": "",
                     "optimization_results_path": "",
                     "boxed_scatter_path": "",
+                    "future_distribution_input_path": "",
                     "future_distribution_plot_path": "",
                     "feature_importance_path": "",
                     "rf_training_summary_path": "",
