@@ -35,7 +35,7 @@ except Exception:
     PYMOO_OK = False
 
 
-DEFAULT_NDC_REFERENCE_PATH = Path(__file__).resolve().parents[2] / "data" / "processed_data" / "ndc_reference.csv"
+DEFAULT_NDC_REFERENCE_PATH = Path(__file__).resolve().parents[2] / "data" / "ndc_data" / "ndc_reference.csv"
 DEFAULT_INCOME_LEVEL_PATH = (
     Path(__file__).resolve().parents[2] / "data" / "raw_data" / "income_level_data" / "2025_wb_income_level_class.xlsx"
 )

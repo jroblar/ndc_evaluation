@@ -20,13 +20,12 @@ from utils.utils import (
 
 SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 PARENT_DIR = SCRIPT_DIR.parent
-ML_DIR = PARENT_DIR / "ml_scripts"
-DATA_DIR = ML_DIR / "output"
+ARIMA_DIR = PARENT_DIR / "arima"
+DATA_DIR = ARIMA_DIR / "output"
 ENSEMBLE_DATA_DIR = DATA_DIR / "ensemble"
-POST_PROCESSED_DATA_DIR = DATA_DIR / "2030_emissions"
-RULES_PATH = ML_DIR / "config" / "variable_projection_rules.json"
-OUTPUT_DIR = SCRIPT_DIR / "scenario_discovery_outputs"
-LOG_PATH = OUTPUT_DIR / "scenario_discovery_batch.log"
+POST_PROCESSED_DATA_DIR = DATA_DIR / "postprocessed_ensemble"
+RULES_PATH = ARIMA_DIR / "config" / "variable_projection_rules.json"
+OUTPUT_BASE_DIR = SCRIPT_DIR / "scenario_discovery_outputs"
 CONFIG_PATH = SCRIPT_DIR / "config" / "config.yaml"
 
 
@@ -167,14 +166,14 @@ def resolve_countries(available_countries: list[str], country_config: dict) -> l
     return [normalized_available[country] for country in requested]
 
 
-def configure_logging() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+def configure_logging(output_dir: Path, log_path: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(LOG_PATH, mode="a"),
+            logging.FileHandler(log_path, mode="a"),
         ],
         force=True,
     )
@@ -201,13 +200,11 @@ def run_country_with_logging(
     return result
 
 
-def build_reports(summary_rows: list[dict], output_dir: Path, run_id: str, n_countries: int) -> dict[str, pd.DataFrame]:
+def build_reports(summary_rows: list[dict], output_dir: Path, report_prefix: str) -> dict[str, pd.DataFrame]:
     summary_df = pd.DataFrame(summary_rows).sort_values("country").reset_index(drop=True)
     feature_frequency_df = build_top_variable_frequency_report(summary_rows)
     feature_combination_frequency_df = build_feature_combination_frequency_report(summary_rows)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_prefix = f"{run_id}_{n_countries}_{timestamp}"
     summary_path = output_dir / f"{report_prefix}_country_run_summary.csv"
     feature_frequency_path = output_dir / f"{report_prefix}_top_variable_frequency_report.csv"
     feature_combination_frequency_path = output_dir / f"{report_prefix}_top_variable_combination_frequency_report.csv"
@@ -247,6 +244,10 @@ ensemble_df_all = pd.read_parquet(ENSEMBLE_DATA_DIR / f"ensemble_arima_{run_id}.
 
 available_countries = df_all["iso_alpha_3"].dropna().unique().tolist()
 countries_to_run = resolve_countries(available_countries, countries_config)
+n_countries = len(countries_to_run)
+run_label = f"{run_id}_{n_countries}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+OUTPUT_DIR = OUTPUT_BASE_DIR / run_label
+LOG_PATH = OUTPUT_DIR / "scenario_discovery_batch.log"
 
 runner = ScenarioDiscoveryBatchRunner(
     projected_df=df_all,
@@ -256,15 +257,16 @@ runner = ScenarioDiscoveryBatchRunner(
     rf_discovery=RandomForestDiscovery(**rf_discovery_config),
 )
 
-configure_logging()
+configure_logging(OUTPUT_DIR, LOG_PATH)
 logging.info("Amount of available countries in the data: %s", len(available_countries))
-logging.info("Amount of configured countries to run: %s", len(countries_to_run))
+logging.info("Amount of configured countries to run: %s", n_countries)
+logging.info("Writing scenario discovery outputs to %s", OUTPUT_DIR)
 logging.info("Running scenario discovery with max_workers=%s", max_workers)
 logging.info("Running random forest with n_jobs=%s per country", rf_n_jobs)
 
 summary_rows: list[dict] = []
 completed = 0
-total = len(countries_to_run)
+total = n_countries
 overall_started_at = time.perf_counter()
 
 with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -339,7 +341,7 @@ with ThreadPoolExecutor(max_workers=max_workers) as executor:
             )
             logging.info("Progress: %s/%s countries completed", completed, total)
 
-reports = build_reports(summary_rows, OUTPUT_DIR, str(run_id), len(countries_to_run))
+reports = build_reports(summary_rows, OUTPUT_DIR, run_label)
 successful_runs = sum(row["status"] == "success" for row in summary_rows)
 failed_runs = sum(row["status"] == "error" for row in summary_rows)
 overall_elapsed = time.perf_counter() - overall_started_at
