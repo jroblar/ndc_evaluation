@@ -69,10 +69,15 @@ class EnsembleProjections:
         df,
         panels,
         hist_df=None,
+        ndc_targets_df=None,
         ncols=2,
         figsize=(12, 8),
         xlabel="Year",
-        save_path=None
+        save_path=None,
+        ndc_target_display="unconditional",
+        ndc_iso_col="iso_alpha_3",
+        unconditional_target_col="unconditional_target",
+        conditional_target_col="conditional_target",
     ):
         """
         Multi-panel pony-tail plot for ensemble projections.
@@ -97,6 +102,14 @@ class EnsembleProjections:
         hist_df : pd.DataFrame, optional
             Historical dataframe with same structure as df (no future_id).
 
+        ndc_targets_df : pd.DataFrame, optional
+            Dataframe with one row per country containing NDC target values to
+            draw as dashed horizontal reference lines in each subplot.
+
+        ndc_target_display : str
+            Which NDC target reference lines to show. One of
+            {"unconditional", "conditional", "both"}.
+
         ncols : int
             Number of columns in subplot grid (default=2).
 
@@ -112,6 +125,12 @@ class EnsembleProjections:
 
         fig, axes = plt.subplots(nrows, ncols, figsize=figsize, sharex=True)
         axes = np.atleast_1d(axes).flatten()
+        valid_ndc_target_display = {"unconditional", "conditional", "both"}
+        if ndc_target_display not in valid_ndc_target_display:
+            raise ValueError(
+                f"ndc_target_display must be one of {sorted(valid_ndc_target_display)}. "
+                f"Received: {ndc_target_display!r}"
+            )
 
         for ax, panel in zip(axes, panels):
             iso = panel["iso"]
@@ -153,6 +172,35 @@ class EnsembleProjections:
                         label="Historical"
                     )
 
+            if ndc_targets_df is not None and ndc_iso_col in ndc_targets_df.columns:
+                ndc_target_row = ndc_targets_df[ndc_targets_df[ndc_iso_col] == iso]
+                if not ndc_target_row.empty:
+                    unconditional_target = pd.to_numeric(
+                        ndc_target_row[unconditional_target_col],
+                        errors="coerce",
+                    ).iloc[0] if unconditional_target_col in ndc_target_row.columns else np.nan
+                    conditional_target = pd.to_numeric(
+                        ndc_target_row[conditional_target_col],
+                        errors="coerce",
+                    ).iloc[0] if conditional_target_col in ndc_target_row.columns else np.nan
+
+                    if ndc_target_display in {"unconditional", "both"} and pd.notna(unconditional_target):
+                        ax.axhline(
+                            unconditional_target,
+                            color="tab:green",
+                            linestyle="--",
+                            linewidth=1.5,
+                            label="NDC unconditional target",
+                        )
+                    if ndc_target_display in {"conditional", "both"} and pd.notna(conditional_target):
+                        ax.axhline(
+                            conditional_target,
+                            color="tab:orange",
+                            linestyle="--",
+                            linewidth=1.5,
+                            label="NDC conditional target",
+                        )
+
             ax.set_title(title)
             ax.set_ylabel(ylabel)
             ax.grid(alpha=0.2)
@@ -166,10 +214,16 @@ class EnsembleProjections:
             ax.set_xlabel(xlabel)
 
         # --- Legend (single) ---
-        if hist_df is not None:
-            handles, labels = axes[0].get_legend_handles_labels()
-            if handles:
-                fig.legend(handles, labels, loc="upper center", ncol=2)
+        legend_handles = []
+        legend_labels = []
+        for ax in axes[:n_panels]:
+            handles, labels = ax.get_legend_handles_labels()
+            for handle, label in zip(handles, labels):
+                if label not in legend_labels:
+                    legend_handles.append(handle)
+                    legend_labels.append(label)
+        if legend_handles:
+            fig.legend(legend_handles, legend_labels, loc="upper center", ncol=3)
 
 
         fig.tight_layout(rect=[0, 0, 1, 0.95])
@@ -766,4 +820,3 @@ class EnsembleProjections:
         cleaned_df = df[~df[id_col].isin(removed_ids)].copy()
 
         return (cleaned_df, removed_ids) if return_removed_ids else cleaned_df
-
