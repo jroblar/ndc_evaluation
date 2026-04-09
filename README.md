@@ -7,6 +7,8 @@ The repository already includes the main artifacts used by the current paper wor
 1. reproduce the published figures from the committed outputs, or
 2. rerun the full pipeline and generate a new run ID.
 
+For the current paper run, you can start from the ARIMA stage because the training data and fitted model are already available in the repository.
+
 ## Current paper run IDs
 
 The current experiment run ID used by the main workflow is `1773188058`.
@@ -138,6 +140,8 @@ inside [`paper_figures.ipynb`](/Users/tony/Documents/research_project/etpe_proje
 
 If your goal is to reproduce the results already represented in [`paper_figures.ipynb`](/Users/tony/Documents/research_project/etpe_project/paper_figures.ipynb), you do not need to rerun the entire pipeline because the required artifacts are already committed.
 
+For run `1773188058`, start from the ARIMA stage, not from model training. The training table and fitted elastic-net model are already available in the repository.
+
 Use the repository as-is and verify that these files exist:
 
 - [`ml/output/training/training_df_1773188058.csv`](/Users/tony/Documents/research_project/etpe_project/ml/output/training/training_df_1773188058.csv)
@@ -148,7 +152,13 @@ Use the repository as-is and verify that these files exist:
 - [`ndc_probability/tables/ndc_probability_analysis_1773188058.csv`](/Users/tony/Documents/research_project/etpe_project/ndc_probability/tables/ndc_probability_analysis_1773188058.csv)
 - [`scenario_discovery/output/1773188058_124_20260408_145246`](/Users/tony/Documents/research_project/etpe_project/scenario_discovery/output/1773188058_124_20260408_145246)
 
-Then open and run [`paper_figures.ipynb`](/Users/tony/Documents/research_project/etpe_project/paper_figures.ipynb).
+To reproduce the current run outputs from the earliest necessary stage:
+
+1. Run [`arima/parallel_arima_v5.py`](/Users/tony/Documents/research_project/etpe_project/arima/parallel_arima_v5.py).
+2. Execute [`arima/postprocess_arima_projections_v5.ipynb`](/Users/tony/Documents/research_project/etpe_project/arima/postprocess_arima_projections_v5.ipynb).
+3. Execute [`ndc_probability/ndc_probability_analysis.ipynb`](/Users/tony/Documents/research_project/etpe_project/ndc_probability/ndc_probability_analysis.ipynb).
+4. Run [`scenario_discovery/run_scenario_discovery_batch.py`](/Users/tony/Documents/research_project/etpe_project/scenario_discovery/run_scenario_discovery_batch.py) if you want to rebuild the scenario-discovery outputs.
+5. Open and run [`paper_figures.ipynb`](/Users/tony/Documents/research_project/etpe_project/paper_figures.ipynb).
 
 ## Full rerun workflow
 
