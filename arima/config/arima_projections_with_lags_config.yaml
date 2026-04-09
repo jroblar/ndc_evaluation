@@ -1,8 +1,7 @@
 ---
 run_id: 1773188058
 variable_projections_rules_file: variable_projection_rules.json
-# n_scenarios: 1000
-n_scenarios: 50
+n_scenarios: 1000
 end_year: 2030
 constant_feature_years:
   emissions_anchor_2022: 2022
