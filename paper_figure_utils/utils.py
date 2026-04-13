@@ -86,7 +86,6 @@ class PaperFiguresUtils:
             / "output"
             / "hp_filtered"
             / f"historical_emissions_hp_trend_{run_id}.parquet",
-            "raw_ensemble_df": root / "arima" / "output" / "ensemble" / f"ensemble_arima_{run_id}.parquet",
             "postprocessed_ensemble_df": root
             / "arima"
             / "output"
@@ -140,7 +139,6 @@ class PaperFiguresUtils:
             "historical_em_df": pd.read_parquet(
                 PaperFiguresUtils._require_existing_file(paths["historical_em_df"])
             ),
-            "raw_ensemble_df": pd.read_parquet(PaperFiguresUtils._require_existing_file(paths["raw_ensemble_df"])),
             "postprocessed_ensemble_df": pd.read_parquet(
                 PaperFiguresUtils._require_existing_file(paths["postprocessed_ensemble_df"])
             ),

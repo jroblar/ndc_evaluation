@@ -183,4 +183,4 @@ scenario_discovery/output/
 ml/legacy models/
 scenario_discovery/legacy/
 arima/output/**/*.parquet
-paper_tables
+paper_tables/*.csv
