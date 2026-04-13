@@ -8,16 +8,25 @@ class PaperFiguresUtils:
     REPO_ROOT = Path(__file__).resolve().parents[1]
     DEFAULT_PAPER_TABLES_DIR = REPO_ROOT / "paper_tables"
     DEFAULT_SCENARIO_DISCOVERY_REGIONS = ("JPN", "MOZ", "MEX")
+    SUPPORTED_SAVE_FORMATS = {"parquet", "csv"}
 
     @staticmethod
     def save_df_dict(
         data_dict: dict[str, Any],
         base_dir: str | Path,
+        save_format: str = "parquet",
+        csv_index: bool = False,
         parquet_index: bool = False,
     ) -> Path:
-        """Recursively save a nested dictionary of DataFrames as parquet files."""
+        """Recursively save a nested dictionary of DataFrames."""
         base_path = Path(base_dir)
         base_path.mkdir(parents=True, exist_ok=True)
+        save_format = save_format.lower()
+        if save_format not in PaperFiguresUtils.SUPPORTED_SAVE_FORMATS:
+            raise ValueError(
+                f"Unsupported save_format '{save_format}'. "
+                f"Expected one of {sorted(PaperFiguresUtils.SUPPORTED_SAVE_FORMATS)}."
+            )
 
         for key, value in data_dict.items():
             key_path = base_path / key
@@ -25,12 +34,17 @@ class PaperFiguresUtils:
                 PaperFiguresUtils.save_df_dict(
                     data_dict=value,
                     base_dir=key_path,
+                    save_format=save_format,
+                    csv_index=csv_index,
                     parquet_index=parquet_index,
                 )
                 continue
 
             if isinstance(value, pd.DataFrame):
-                value.to_parquet(key_path.with_suffix(".parquet"), index=parquet_index)
+                if save_format == "parquet":
+                    value.to_parquet(key_path.with_suffix(".parquet"), index=parquet_index)
+                else:
+                    value.to_csv(key_path.with_suffix(".csv"), index=csv_index)
                 continue
 
             raise TypeError(
@@ -53,6 +67,8 @@ class PaperFiguresUtils:
                 data[path.name] = PaperFiguresUtils.load_df_dict(path)
             elif path.suffix == ".parquet":
                 data[path.stem] = pd.read_parquet(path)
+            elif path.suffix == ".csv":
+                data[path.stem] = pd.read_csv(path)
         return data
 
     @staticmethod
@@ -187,6 +203,8 @@ class PaperFiguresUtils:
         paper_tables_dir: str | Path | None = None,
         repo_root: str | Path | None = None,
         regions_of_interest: list[str] | tuple[str, ...] | None = None,
+        save_format: str = "parquet",
+        csv_index: bool = False,
         parquet_index: bool = False,
     ) -> dict[str, Any]:
         """
@@ -209,6 +227,10 @@ class PaperFiguresUtils:
         regions_of_interest
             Scenario discovery regions to include. Defaults to `("JPN", "MOZ", "MEX")`
             when those directories exist, otherwise all available region directories.
+        save_format
+            Cache format for saved tables. Supported values: `"parquet"` and `"csv"`.
+        csv_index
+            Whether to preserve the DataFrame index in saved CSV files.
         parquet_index
             Whether to preserve the DataFrame index in saved parquet files.
         """
@@ -223,7 +245,13 @@ class PaperFiguresUtils:
                 regions_of_interest=regions_of_interest,
                 repo_root=repo_root,
             )
-            PaperFiguresUtils.save_df_dict(data, output_dir, parquet_index=parquet_index)
+            PaperFiguresUtils.save_df_dict(
+                data,
+                output_dir,
+                save_format=save_format,
+                csv_index=csv_index,
+                parquet_index=parquet_index,
+            )
             return PaperFiguresUtils.to_notebook_variables(data)
 
         if load_saved_data:
