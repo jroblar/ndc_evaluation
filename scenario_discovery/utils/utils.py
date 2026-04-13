@@ -35,7 +35,7 @@ except Exception:
     PYMOO_OK = False
 
 
-DEFAULT_NDC_REFERENCE_PATH = Path(__file__).resolve().parents[2] / "data" / "ndc_data" / "ndc_reference.csv"
+DEFAULT_NDC_TABLES_DIR = Path(__file__).resolve().parents[2] / "ndc_probability" / "tables"
 DEFAULT_INCOME_LEVEL_PATH = (
     Path(__file__).resolve().parents[2] / "data" / "raw_data" / "income_level_data" / "2025_wb_income_level_class.xlsx"
 )
@@ -121,6 +121,22 @@ def parse_feature_list(value: Any) -> list[str]:
     if isinstance(value, (list, tuple, set)):
         return [str(feature) for feature in value if str(feature)]
     return []
+
+
+def resolve_ndc_table_path(
+    run_id: str | int,
+    ndc_tables_dir: str | Path = DEFAULT_NDC_TABLES_DIR,
+) -> Path:
+    ndc_tables_dir = Path(ndc_tables_dir)
+    if not ndc_tables_dir.exists():
+        raise FileNotFoundError(f"NDC tables directory not found: {ndc_tables_dir}")
+
+    ndc_table_path = ndc_tables_dir / f"ndc_probability_analysis_{run_id}.csv"
+    if not ndc_table_path.exists():
+        raise FileNotFoundError(
+            f"NDC probability table not found for run_id '{run_id}': {ndc_table_path}"
+        )
+    return ndc_table_path
 
 
 def add_income_group_country_fields(
@@ -261,9 +277,11 @@ class VulnerabilityAnalyzer:
         value_col: str,
         id_cols: tuple[str, str] = ("future_id", "iso_alpha_3"),
         auto_threshold: bool = False,
-        ndc_reference_path: str | Path = DEFAULT_NDC_REFERENCE_PATH,
-        ndc_iso_col: str = "ISO",
-        ndc_value_col: str = "Unconditional",
+        run_id: str | int | None = None,
+        ndc_tables_dir: str | Path = DEFAULT_NDC_TABLES_DIR,
+        ndc_reference_path: str | Path | None = None,
+        ndc_iso_col: str = "iso_alpha_3",
+        ndc_value_col: str = "unconditional_target",
         ndc_output_col: str = NDC_UNCONDITIONAL_COL,
     ) -> pd.DataFrame:
         emissions_change_df = VulnerabilityAnalyzer.compute_vulnerability_indicator(
@@ -274,6 +292,11 @@ class VulnerabilityAnalyzer:
             id_cols=id_cols,
             auto_threshold=auto_threshold,
         )
+        if ndc_reference_path is None:
+            if run_id is None:
+                raise ValueError("Either 'run_id' or 'ndc_reference_path' must be provided.")
+            ndc_reference_path = resolve_ndc_table_path(run_id=run_id, ndc_tables_dir=ndc_tables_dir)
+
         ndc_reference_path = Path(ndc_reference_path)
         if not ndc_reference_path.exists():
             raise FileNotFoundError(f"NDC reference file not found: {ndc_reference_path}")
@@ -1404,6 +1427,7 @@ class ScenarioDiscoveryBatchRunner:
         projected_df: pd.DataFrame,
         ensemble_df: pd.DataFrame,
         rules_path: str | Path,
+        run_id: str | int | None = None,
         value_col: str = "con_edgar_ghg_mt_hp_trend",
         year1: str = "2022",
         year2: str = "2030",
@@ -1420,6 +1444,7 @@ class ScenarioDiscoveryBatchRunner:
         self.projected_df = projected_df.copy()
         self.ensemble_df = ensemble_df.copy()
         self.rules_path = Path(rules_path)
+        self.run_id = run_id
         self.value_col = value_col
         self.year1 = year1
         self.year2 = year2
@@ -1516,6 +1541,7 @@ class ScenarioDiscoveryBatchRunner:
             self.year2,
             self.value_col,
             auto_threshold=self.auto_threshold,
+            run_id=self.run_id,
         )
         vulnerability_threshold = (
             float(df_pivot["vulnerability_threshold"].dropna().iloc[0])

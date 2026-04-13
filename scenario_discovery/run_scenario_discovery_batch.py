@@ -253,6 +253,7 @@ runner = ScenarioDiscoveryBatchRunner(
     projected_df=df_all,
     ensemble_df=ensemble_df_all,
     rules_path=RULES_PATH,
+    run_id=run_id,
     **scenario_discovery_config,
     rf_discovery=RandomForestDiscovery(**rf_discovery_config),
 )
