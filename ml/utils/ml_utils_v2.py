@@ -932,12 +932,38 @@ class RegressionAnalysis:
         df_res = df_res.reset_index(drop=True)
 
         if plot:
+            if sort_by not in df_res.columns:
+                raise ValueError(f"Cannot plot because sort_by={sort_by!r} is not in results.")
+
             plot_df = df_res.head(top_n).sort_values(sort_by, ascending=True)
             plt.figure(figsize=(10, max(4, 0.35 * len(plot_df))))
             plt.barh(plot_df["feature"], plot_df[sort_by])
             plt.xlabel(sort_by)
             plt.ylabel("Feature")
             plt.title(f"{model}: baseline + one feature vs baseline")
+            plt.tight_layout()
+            plt.show()
+
+            elbow_df = (
+                df_res
+                .dropna(subset=[sort_by])
+                .sort_values(sort_by, ascending=True)
+                .reset_index(drop=True)
+            )
+            elbow_df["feature_rank"] = np.arange(1, len(elbow_df) + 1)
+
+            plt.figure(figsize=(9, 5))
+            plt.plot(
+                elbow_df["feature_rank"],
+                elbow_df[sort_by],
+                marker="o",
+                linewidth=1.5,
+            )
+            if elbow_df[sort_by].min() < 0 < elbow_df[sort_by].max():
+                plt.axhline(0, color="black", linewidth=0.8, linestyle="--")
+            plt.xlabel(f"Feature rank sorted by {sort_by}")
+            plt.ylabel(sort_by)
+            plt.title(f"{model}: one-feature screen elbow plot")
             plt.tight_layout()
             plt.show()
 
