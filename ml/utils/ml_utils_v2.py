@@ -624,6 +624,8 @@ class RegressionAnalysis:
     
     def _make_estimator(self, model: str):
         model = model.strip().lower()
+        if model == "ridge":
+            return "ridge", RidgeCV(alphas=np.logspace(-4, 4, 60))
         if model == "randomforest":
             return "rf", RandomForestRegressor(**self.rf_params)
         if model == "xgboost":
@@ -636,8 +638,310 @@ class RegressionAnalysis:
             return "median", DummyRegressor(strategy="median")
         raise ValueError(
             "model must be one of: "
-            "['RandomForest', 'XGBoost', 'ElasticNet', 'Median']"
+            "['Ridge', 'RandomForest', 'XGBoost', 'ElasticNet', 'Median']"
         )
+
+    def _make_baseline_feature_preprocessor(
+        self,
+        features: Optional[list] = None,
+        include_group: bool = True,
+        include_year_trend: bool = True,
+    ):
+        """
+        Preprocessor for baseline-plus-feature experiments.
+
+        This intentionally ignores self.include_year because the experiment has a
+        fixed reference specification: country fixed effects plus a linear year
+        trend, optionally augmented with one or more candidate features.
+        """
+        feats = [] if features is None else features.copy()
+
+        categorical = []
+        numeric = []
+
+        if include_group:
+            categorical.append(self.group_col)
+        if include_year_trend:
+            numeric.append(self.year_col)
+
+        for col in feats:
+            if col in [self.target_col, self.group_col, self.year_col]:
+                continue
+            if pd.api.types.is_numeric_dtype(self.df[col]):
+                numeric.append(col)
+            else:
+                categorical.append(col)
+
+        transformers = []
+        if numeric:
+            transformers.append(
+                ("num", Pipeline([
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("scaler", self._get_scaler()),
+                ]), numeric)
+            )
+
+        if categorical:
+            transformers.append(
+                ("cat", Pipeline([
+                    ("imputer", SimpleImputer(strategy="most_frequent")),
+                    ("onehot", OneHotEncoder(drop="first", handle_unknown="ignore")),
+                ]), categorical)
+            )
+
+        if not transformers:
+            raise ValueError("At least one baseline control or feature is required.")
+
+        return ColumnTransformer(transformers=transformers)
+
+    def _make_baseline_feature_pipeline(
+        self,
+        model: str,
+        features: Optional[list] = None,
+        include_group: bool = True,
+        include_year_trend: bool = True,
+    ) -> Pipeline:
+        pre = self._make_baseline_feature_preprocessor(
+            features=features,
+            include_group=include_group,
+            include_year_trend=include_year_trend,
+        )
+        est_name, est = self._make_estimator(model)
+        return Pipeline([("pre", pre), (est_name, est)])
+
+    def _prediction_metrics(self, y_true_log, y_pred_log) -> Dict[str, float]:
+        return {
+            "mae_log": mean_absolute_error(y_true_log, y_pred_log),
+            "rmse_log": self._rmse_log_space(y_true_log, y_pred_log),
+            "r2_log": r2_score(y_true_log, y_pred_log),
+            "mae_level": self._mae_level_space(y_true_log, y_pred_log),
+        }
+
+    def _residual_variance_reduction(
+        self,
+        y_true_log,
+        baseline_pred_log,
+        feature_pred_log,
+    ) -> float:
+        baseline_sse = float(np.sum((np.asarray(y_true_log) - baseline_pred_log) ** 2))
+        feature_sse = float(np.sum((np.asarray(y_true_log) - feature_pred_log) ** 2))
+        if baseline_sse == 0:
+            return np.nan
+        return 1.0 - (feature_sse / baseline_sse)
+
+    def _fitted_estimator_summary(self, pipe: Pipeline, model: str) -> Dict[str, Any]:
+        model_key = model.strip().lower()
+        step_name = {
+            "ridge": "ridge",
+            "elasticnet": "enet",
+            "randomforest": "rf",
+            "xgboost": "xgb",
+            "median": "median",
+        }.get(model_key)
+        if step_name is None or step_name not in pipe.named_steps:
+            return {}
+
+        est = pipe.named_steps[step_name]
+        summary: Dict[str, Any] = {}
+        if hasattr(est, "alpha_"):
+            summary["selected_alpha"] = float(est.alpha_)
+        if hasattr(est, "l1_ratio_"):
+            summary["selected_l1_ratio"] = float(est.l1_ratio_)
+        if hasattr(est, "n_iter_"):
+            summary["n_iter"] = est.n_iter_
+        if hasattr(est, "coef_"):
+            coef = np.asarray(est.coef_)
+            summary["n_nonzero_coef"] = int(np.sum(np.abs(coef) > 1e-12))
+        return summary
+
+    def single_feature_baseline_experiment(
+        self,
+        features: Optional[Iterable[str]] = None,
+        model: str = "Ridge",
+        include_group: bool = True,
+        include_year_trend: bool = True,
+        dropna: bool = True,
+        sort_by: str = "test_mae_level_improvement",
+        ascending: bool = False,
+        plot: bool = False,
+        top_n: int = 25,
+    ) -> pd.DataFrame:
+        """
+        Compare a fixed baseline against baseline + one feature at a time.
+
+        Baseline specification:
+            target ~ country fixed effects + linear year trend
+
+        Feature specification for each candidate:
+            target ~ country fixed effects + linear year trend + feature
+
+        This is useful for screening whether a new feature adds predictive signal
+        beyond the panel's country/time structure. It is not a causal test.
+
+        Parameters
+        ----------
+        features : iterable of str or None
+            Candidate features to test. Defaults to self.feature_cols.
+        model : str, default="Ridge"
+            Estimator to use. Supports "Ridge", "ElasticNet", "RandomForest",
+            "XGBoost", and "Median". Ridge is the recommended default for this
+            single-feature diagnostic because it is stable and fast.
+        include_group : bool, default=True
+            Include country fixed effects via one-hot encoded group_col.
+        include_year_trend : bool, default=True
+            Include year_col as a numeric linear trend.
+        dropna : bool, default=True
+            If True, fit and score each feature on rows where that feature and
+            the target are non-missing. The baseline is refit on the same rows,
+            so feature comparisons are sample-consistent.
+        sort_by : str, default="test_mae_level_improvement"
+            Result column used to sort the returned table.
+        ascending : bool, default=False
+            Sort direction.
+        plot : bool, default=False
+            If True, plot the top_n features by sort_by.
+        top_n : int, default=25
+            Number of rows to show in the optional plot.
+
+        Returns
+        -------
+        pd.DataFrame
+            One row per feature with baseline metrics, baseline+feature metrics,
+            deltas, and partial R2 relative to baseline residual variance.
+        """
+        candidate_features = list(self.feature_cols if features is None else features)
+        candidate_features = [
+            col for col in candidate_features
+            if col not in [self.target_col, self.group_col, self.year_col]
+        ]
+        if len(candidate_features) == 0:
+            raise ValueError("No candidate features provided.")
+
+        rows = []
+        for feature in candidate_features:
+            if feature not in self.df.columns:
+                raise KeyError(f"Feature not found in df: {feature}")
+
+            train_df = self.X_train.copy()
+            test_df = self.X_test.copy()
+
+            if dropna:
+                required = [self.target_col, feature]
+                train_df = train_df.dropna(subset=required)
+                test_df = test_df.dropna(subset=required)
+            else:
+                train_df = train_df.dropna(subset=[self.target_col])
+                test_df = test_df.dropna(subset=[self.target_col])
+
+            if train_df.empty or test_df.empty:
+                rows.append({
+                    "feature": feature,
+                    "model": model,
+                    "n_train": len(train_df),
+                    "n_test": len(test_df),
+                    "error": "empty train or test split after filtering",
+                })
+                continue
+
+            y_train = train_df[self.target_col]
+            y_test = test_df[self.target_col]
+
+            baseline_pipe = self._make_baseline_feature_pipeline(
+                model=model,
+                features=[],
+                include_group=include_group,
+                include_year_trend=include_year_trend,
+            )
+            feature_pipe = self._make_baseline_feature_pipeline(
+                model=model,
+                features=[feature],
+                include_group=include_group,
+                include_year_trend=include_year_trend,
+            )
+
+            baseline_pipe.fit(train_df, y_train)
+            feature_pipe.fit(train_df, y_train)
+
+            baseline_train_pred = baseline_pipe.predict(train_df)
+            baseline_test_pred = baseline_pipe.predict(test_df)
+            feature_train_pred = feature_pipe.predict(train_df)
+            feature_test_pred = feature_pipe.predict(test_df)
+
+            baseline_train_metrics = self._prediction_metrics(y_train, baseline_train_pred)
+            baseline_test_metrics = self._prediction_metrics(y_test, baseline_test_pred)
+            feature_train_metrics = self._prediction_metrics(y_train, feature_train_pred)
+            feature_test_metrics = self._prediction_metrics(y_test, feature_test_pred)
+
+            row: Dict[str, Any] = {
+                "feature": feature,
+                "feature_dtype": str(self.df[feature].dtype),
+                "model": model,
+                "include_group": include_group,
+                "include_year_trend": include_year_trend,
+                "dropna": dropna,
+                "n_train": int(len(train_df)),
+                "n_test": int(len(test_df)),
+                "train_year_min": int(train_df[self.year_col].min()),
+                "train_year_max": int(train_df[self.year_col].max()),
+                "test_year_min": int(test_df[self.year_col].min()),
+                "test_year_max": int(test_df[self.year_col].max()),
+                "feature_train_missing": int(self.X_train[feature].isna().sum()),
+                "feature_test_missing": int(self.X_test[feature].isna().sum()),
+                "partial_train_r2_vs_baseline": self._residual_variance_reduction(
+                    y_train,
+                    baseline_train_pred,
+                    feature_train_pred,
+                ),
+                "partial_test_r2_vs_baseline": self._residual_variance_reduction(
+                    y_test,
+                    baseline_test_pred,
+                    feature_test_pred,
+                ),
+            }
+
+            for metric_name, metric_value in baseline_train_metrics.items():
+                row[f"baseline_train_{metric_name}"] = metric_value
+            for metric_name, metric_value in feature_train_metrics.items():
+                row[f"feature_train_{metric_name}"] = metric_value
+                row[f"delta_train_{metric_name}"] = (
+                    metric_value - baseline_train_metrics[metric_name]
+                )
+            for metric_name, metric_value in baseline_test_metrics.items():
+                row[f"baseline_test_{metric_name}"] = metric_value
+            for metric_name, metric_value in feature_test_metrics.items():
+                row[f"feature_test_{metric_name}"] = metric_value
+                row[f"delta_test_{metric_name}"] = (
+                    metric_value - baseline_test_metrics[metric_name]
+                )
+
+            row["test_mae_level_improvement"] = (
+                row["baseline_test_mae_level"] - row["feature_test_mae_level"]
+            )
+            row["test_mae_log_improvement"] = (
+                row["baseline_test_mae_log"] - row["feature_test_mae_log"]
+            )
+            row["test_r2_log_improvement"] = (
+                row["feature_test_r2_log"] - row["baseline_test_r2_log"]
+            )
+            row.update(self._fitted_estimator_summary(feature_pipe, model))
+            rows.append(row)
+
+        df_res = pd.DataFrame(rows)
+        if sort_by in df_res.columns:
+            df_res = df_res.sort_values(sort_by, ascending=ascending)
+        df_res = df_res.reset_index(drop=True)
+
+        if plot:
+            plot_df = df_res.head(top_n).sort_values(sort_by, ascending=True)
+            plt.figure(figsize=(10, max(4, 0.35 * len(plot_df))))
+            plt.barh(plot_df["feature"], plot_df[sort_by])
+            plt.xlabel(sort_by)
+            plt.ylabel("Feature")
+            plt.title(f"{model}: baseline + one feature vs baseline")
+            plt.tight_layout()
+            plt.show()
+
+        return df_res
     
     def pca_experiment(
         self,
