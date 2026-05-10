@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from pandas.api.types import is_numeric_dtype
 from typing import List, Any
 
 from sklearn.pipeline import Pipeline, FeatureUnion
@@ -152,8 +153,8 @@ class RegressionAnalysis:
         if include_group:
             feats = feats + [self.group_col]
 
-        categorical = [c for c in feats if self.df[c].dtype == "object"]
-        numeric = [c for c in feats if c not in categorical]
+        numeric = [c for c in feats if is_numeric_dtype(self.df[c])]
+        categorical = [c for c in feats if c not in numeric]
 
         return ColumnTransformer(
             transformers=[
