@@ -1,48 +1,63 @@
 ---
-run_id: 1773188058
+run_id: 1778464552
 variable_projections_rules_file: variable_projection_rules.json
 n_scenarios: 1000
 end_year: 2030
-constant_feature_years:
-  emissions_anchor_2022: 2022
-deterministic_year_features:
-  years_since_2022: 2022
-derived_multiplicative_features:
-  trend_year_interaction:
-  - em_trend_5y
-  - years_since_2022
+arima_vars:
+  # - em_lag_1y
+  # - x_log_signed_con_primary_energy_twh
+  # - x_log_signed_con_energy_per_capita_kwh
+  # - x_log_signed_con_demand
+  # - x_log_signed_cap_gdp_per_capita_ppp_current
+  # - x_log_signed_con_hydro
+  # - cap_control_corruption
+  # - con_ndgain_vulnerability
+  # - x_log_signed_con_coal
+  # - x_log_signed_con_demand_per_capita
+  # - cap_govt_effectiveness
+  # - x_log_signed_con_electricity_access_pct
+  # - x_log_signed_con_other_fossil
+  # - con_ndgain_score
+  # - con_renewables_share_elec_pct
+  # - inc_has_carbon_tax
+  # - cap_regulatory_quality
+  # - cap_corruption_idx
+  # - x_log_signed_inc_carbon_pricing_coverage
+  # - inc_has_renewable_target
+  # - cap_voice_accountability
+  # - cap_liberal_democracy_idx
+  # - cap_political_stability
+  # - inc_has_framework_law
+  - x_log_signed_con_primary_energy_twh
+  - x_log_signed_con_energy_per_capita_kwh
+  - x_log_signed_cap_gdp_per_capita_ppp_current
+  - x_log_signed_con_demand
+  - x_log_signed_con_hydro
+  - cap_control_corruption
+  - con_ndgain_vulnerability
+  - x_log_signed_con_demand_per_capita
+  - x_log_signed_con_coal
+  - cap_govt_effectiveness
+  - x_log_signed_con_electricity_access_pct
+  - con_ndgain_score
+  - cap_corruption_idx
+  - con_renewables_share_elec_pct
+  - cap_regulatory_quality
+  - x_log_signed_con_other_fossil
+  - x_log_signed_inc_carbon_pricing_coverage
+  - inc_has_renewable_target
+  - cap_voice_accountability
+  - cap_liberal_democracy_idx
+  - inc_has_carbon_tax
+  - inc_has_efficiency_standard
+  - inc_has_framework_law
 lag_features:
-  em_lag_1y: x_log_signed_con_edgar_ghg_mt
-rolling_slope_features:
-  em_trend_3y:
+  em_lag_1y:
     source_col: x_log_signed_con_edgar_ghg_mt
-    window: 3
-    min_periods: 2
-    shift: 1
-  em_trend_5y:
-    source_col: x_log_signed_con_edgar_ghg_mt
-    window: 5
-    min_periods: 3
-    shift: 1
-rolling_std_features:
-  em_volatility_5y:
-    source_col: x_log_signed_con_edgar_ghg_mt
-    window: 5
-    min_periods: 3
-    shift: 1
-difference_features:
-  em_acceleration:
-  - em_trend_3y
-  - em_trend_5y
-feature_innovation_scale:
-  em_trend_3y: 0.1
-  em_trend_5y: 0.1
-  em_volatility_5y: 0.1
-  em_acceleration: 0.1
-  em_lag_1y: 0.1
+    mode: linear_trend
+    window: 6
+    slope_clip: 0.4
 sarimax_trend: c
 trend_guidance_default_blend: 0.2
-trend_guidance_feature_blend:
-  x_log_signed_con_edgar_ghg_mt: 0.6
 trend_guidance_window: 6
 trend_guidance_slope_clip: 0.4
