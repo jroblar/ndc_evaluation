@@ -1,0 +1,16 @@
+{
+  "source": "EDGAR 2025 + LULUCF Data Hub v3.0",
+  "edgar_url": "https://edgar.jrc.ec.europa.eu/booklet/EDGAR_2025_GHG_booklet_2025.xlsx",
+  "edgar_citation": "Crippa, M., et al. (2025). GHG emissions of all world countries - JRC/IEA 2025 Report.",
+  "lulucf_url": "https://doi.org/10.5281/zenodo.17153438",
+  "lulucf_citation": "Melo, J., et al. (2025). LULUCF Data Hub v3.0. 2025 NGHGI release. Zenodo.",
+  "accessed": "2026-04-27T22:36:02.812554",
+  "variables": {
+    "total_emissions": "Total GHG emissions including LULUCF (MtCO2e)",
+    "total_emissions_excl_lulucf": "Total GHG emissions excluding LULUCF (MtCO2e)"
+  },
+  "units": "MtCO2e",
+  "gwp": "AR5 100-year GWP",
+  "years": "2000-2023",
+  "license": "CC BY 4.0"
+}
