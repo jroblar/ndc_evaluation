@@ -1,4 +1,4 @@
-run_id: 1773188058
+run_id: 1778464552
 max_workers: 4
 
 countries:
@@ -22,7 +22,6 @@ scenario_discovery_config:
     - em_trend_5y
     - em_volatility_5y
     - em_acceleration
-    - x_log_signed_con_demand
 
 rf_discovery_config:
   n_jobs: 1

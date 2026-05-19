@@ -184,3 +184,7 @@ ml/legacy models/
 scenario_discovery/legacy/
 arima/output/**/*.parquet
 paper_tables/*.csv
+ml/output/mediation/
+data/raw_data/policy_index/
+data/update_emissions_data.ipynb
+.vscode/

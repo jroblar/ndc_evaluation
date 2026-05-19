@@ -304,8 +304,8 @@ def _apply_projection_rules(
                 if len(idx) <= 1:
                     continue
 
-                path = out.loc[idx, var].to_numpy(dtype=float)
-                latent = latent_sorted.iloc[idx].to_numpy(dtype=float)
+                path = out.loc[idx, var].to_numpy(dtype=float, copy=True)
+                latent = latent_sorted.iloc[idx].to_numpy(dtype=float, copy=True)
 
                 # Treat first row as anchor state; future can switch at most once and then persist.
                 start_state = int(np.rint(path[0]))
@@ -477,6 +477,105 @@ def _build_recent_trend_line(
     return last + slope * steps
 
 
+def _safe_value_at_or_before_year(
+    df_country: pd.DataFrame,
+    var_name: str,
+    year: int,
+    default: float = np.nan,
+) -> float:
+    if var_name not in df_country.columns:
+        return float(default)
+
+    years = pd.to_numeric(df_country["year"], errors="coerce")
+    values = pd.to_numeric(df_country[var_name], errors="coerce")
+    mask = (years <= int(year)) & values.notna()
+    vals = values.loc[mask]
+    return float(vals.iloc[-1]) if len(vals) else float(default)
+
+
+def _build_linear_lag_projection(
+    out: pd.DataFrame,
+    df_country: pd.DataFrame,
+    source_col: str,
+    window: int,
+    slope_clip: float,
+) -> pd.Series:
+    """
+    Build a deterministic one-year lag from historical source values plus a
+    recent linear trend. The same value is used for every scenario/future_id.
+    """
+    result = pd.Series(np.nan, index=out.index, dtype=float)
+    if out.empty or source_col not in df_country.columns:
+        return result
+
+    hist = pd.DataFrame(
+        {
+            "year": _as_year_int(df_country["year"]),
+            "value": pd.to_numeric(df_country[source_col], errors="coerce"),
+        }
+    ).dropna(subset=["year"])
+    if hist.empty:
+        return result
+
+    hist["year"] = hist["year"].astype(int)
+    hist_by_year = (
+        hist.dropna(subset=["value"])
+        .drop_duplicates(subset=["year"], keep="last")
+        .sort_values("year")
+        .set_index("year")["value"]
+        .astype(float)
+    )
+    if hist_by_year.empty:
+        return result
+
+    out_years = _as_year_int(out["year"])
+    valid_out_years = out_years.dropna().astype(int)
+    if valid_out_years.empty:
+        return result
+
+    last_year = int(hist["year"].max())
+    max_lag_year = int(valid_out_years.max()) - 1
+    future_horizon = max(0, max_lag_year - last_year)
+
+    trend_line = None
+    if future_horizon > 0:
+        trend_line = _build_recent_trend_line(
+            hist_levels=hist_by_year,
+            horizon=future_horizon,
+            window=int(window),
+            slope_clip=float(slope_clip),
+        )
+        if trend_line is None:
+            last_val = _safe_last_valid(hist_by_year, default=np.nan)
+            if np.isfinite(last_val):
+                trend_line = np.full(future_horizon, last_val, dtype=float)
+
+    lag_years = sorted({int(y) - 1 for y in valid_out_years})
+    lag_values: Dict[int, float] = {}
+    for lag_year in lag_years:
+        if lag_year <= last_year:
+            if lag_year in hist_by_year.index:
+                lag_values[lag_year] = float(hist_by_year.loc[lag_year])
+            else:
+                lag_values[lag_year] = _safe_value_at_or_before_year(
+                    df_country,
+                    var_name=source_col,
+                    year=lag_year,
+                    default=np.nan,
+                )
+            continue
+
+        trend_idx = lag_year - last_year - 1
+        if trend_line is not None and 0 <= trend_idx < len(trend_line):
+            lag_values[lag_year] = float(trend_line[trend_idx])
+        else:
+            lag_values[lag_year] = np.nan
+
+    return out_years.map(
+        lambda y: lag_values.get(int(y) - 1, np.nan) if pd.notna(y) else np.nan
+    ).astype(float)
+
+
 @dataclass
 class EnsembleConfig:
     end_year: int
@@ -504,6 +603,9 @@ class EnsembleConfig:
     # {"em_lag_1y": {"source_col":"x_log_signed_con_edgar_ghg_mt","mode":"trend_guided",
     #                "anchor_col":"emissions_anchor_2022","trend_col":"em_trend_5y",
     #                "years_since_col":"years_since_2022","blend":0.8}}
+    # Deterministic linear form:
+    # {"em_lag_1y": {"source_col":"x_log_signed_con_edgar_ghg_mt","mode":"linear_trend",
+    #                "window":6,"slope_clip":0.4}}
     lag_features: Dict[str, object] = field(default_factory=dict)
     # Rolling slope features.
     # Example:
@@ -538,6 +640,30 @@ def _collect_non_simulated_feature_names(config: EnsembleConfig) -> set:
         | set((config.rolling_std_features or {}).keys())
         | set((config.difference_features or {}).keys())
     )
+
+
+def _collect_required_source_columns(config: EnsembleConfig) -> set:
+    required = set()
+
+    for spec in (config.lag_features or {}).values():
+        if isinstance(spec, str):
+            required.add(spec)
+        elif isinstance(spec, dict):
+            source_col = spec.get("source_col")
+            if source_col:
+                required.add(str(source_col))
+
+    for specs in (
+        config.rolling_slope_features or {},
+        config.rolling_std_features or {},
+    ):
+        for spec in specs.values():
+            if isinstance(spec, dict):
+                source_col = spec.get("source_col")
+                if source_col:
+                    required.add(str(source_col))
+
+    return required
 
 
 def _compute_slope_raw(values: np.ndarray) -> float:
@@ -696,7 +822,6 @@ def simulate_country_ensemble(
     # Lag/rolling features are computed per trajectory in temporal order.
     if lag_features or rolling_slope_features or rolling_std_features:
         out = out.sort_values(["future_id", "year"]).reset_index(drop=True)
-        out_year_int = _as_year_int(out["year"])
 
         for lag_col, lag_spec in lag_features.items():
             if isinstance(lag_spec, str):
@@ -706,6 +831,8 @@ def simulate_country_ensemble(
                 trend_col = None
                 years_since_col = None
                 blend = 1.0
+                window = int(config.trend_guidance_window)
+                slope_clip = float(config.trend_guidance_slope_clip)
             elif isinstance(lag_spec, dict):
                 source_col = str(lag_spec.get("source_col", ""))
                 mode = str(lag_spec.get("mode", "source_lag")).lower()
@@ -713,8 +840,31 @@ def simulate_country_ensemble(
                 trend_col = lag_spec.get("trend_col")
                 years_since_col = lag_spec.get("years_since_col")
                 blend = float(lag_spec.get("blend", 0.8))
+                window = int(
+                    lag_spec.get(
+                        "window",
+                        lag_spec.get("trend_window", config.trend_guidance_window),
+                    )
+                )
+                slope_clip = float(lag_spec.get("slope_clip", config.trend_guidance_slope_clip))
             else:
                 raise ValueError(f"Invalid lag_features spec for '{lag_col}'.")
+
+            if mode == "linear_trend":
+                out[lag_col] = _build_linear_lag_projection(
+                    out=out,
+                    df_country=dfc,
+                    source_col=source_col,
+                    window=window,
+                    slope_clip=slope_clip,
+                )
+                continue
+
+            if mode not in {"source_lag", "trend_guided"}:
+                raise ValueError(
+                    f"Unsupported lag feature mode '{mode}' for '{lag_col}'. "
+                    "Allowed modes: source_lag, trend_guided, linear_trend."
+                )
 
             if source_col not in out.columns:
                 out[lag_col] = np.nan
@@ -909,7 +1059,7 @@ def generate_ensemble(
     non_simulated_vars = _collect_non_simulated_feature_names(config)
     simulated_vars = [v for v in arima_vars if v not in non_simulated_vars]
 
-    required = {"iso_alpha_3", "year", *simulated_vars}
+    required = {"iso_alpha_3", "year", *simulated_vars, *_collect_required_source_columns(config)}
     missing = sorted([c for c in required if c not in df.columns])
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
@@ -979,15 +1129,18 @@ if __name__ == "__main__":
             arima_config = yaml.safe_load(stream)
         except yaml.YAMLError as exc:
             print(exc)
-        
+
     # File names
     run_id = arima_config["run_id"]
     data_to_project = f"training_df_{run_id}.csv"
     variable_projections_rules_file = arima_config["variable_projections_rules_file"]
     n_scenarios = arima_config["n_scenarios"]
     end_year = arima_config["end_year"]
-    
-    
+    arima_vars = arima_config.get("arima_vars")
+    if arima_vars is not None:
+        if not isinstance(arima_vars, list) or not all(isinstance(v, str) for v in arima_vars):
+            raise ValueError("'arima_vars' must be a list of column names.")
+
     training_df_log_transformed = pd.read_csv(
         os.path.join(TRAINING_DIR_PATH, data_to_project)
     )
@@ -1024,6 +1177,7 @@ if __name__ == "__main__":
         df=training_df_log_transformed,
         out_path=out_path,
         config=cfg,
+        arima_vars=arima_vars,
         n_jobs=-1,
     )
 

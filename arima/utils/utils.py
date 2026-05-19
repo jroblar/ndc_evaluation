@@ -659,11 +659,11 @@ class EnsembleProjections:
         # Helper: process one group slice
         def _process_group(i_start, i_end):
             sl = slice(i_start, i_end)
-            X = w.iloc[sl, 2:].to_numpy(dtype=float, copy=False)  # only 'cols'
+            X = w.iloc[sl, 2:].to_numpy(dtype=float, copy=True)  # only 'cols'
             # Interpolate once per group across rows (time order already sorted)
             if interpolate:
                 # Use pandas for robust edge handling but only once per group
-                X = pd.DataFrame(X).interpolate(limit_direction="both").to_numpy(dtype=float, copy=False)
+                X = pd.DataFrame(X).interpolate(limit_direction="both").to_numpy(dtype=float, copy=True)
 
             # Per-column HP filtering (statsmodels not vectorized)
             m = X.shape[0]

@@ -369,6 +369,37 @@ class EDAUtils:
         zs = df[numeric_cols].apply(zscore).abs()
         outlier_pct = (zs > z_thresh).sum() / len(df) * 100
         return outlier_pct[outlier_pct > 0].to_dict()
+
+    @staticmethod
+    def plot_simple_histogram(df, column):
+        if column not in df.columns:
+            logger.error(f"Column '{column}' does not exist in the DataFrame.")
+            return
+
+        plt.figure(figsize=(10, 6))
+        sns.histplot(df[column].dropna(), bins=30, kde=True)
+        plt.title(f"Histogram of {column}")
+        plt.xlabel(column)
+        plt.ylabel("Frequency")
+        plt.grid()
+        plt.tight_layout()
+        plt.show()
+
+    @staticmethod
+    def plot_simple_lineplot(df, x_col, y_col):
+        if x_col not in df.columns or y_col not in df.columns:
+            logger.error(f"Columns '{x_col}' and/or '{y_col}' do not exist in the DataFrame.")
+            return
+
+        plt.figure(figsize=(10, 6))
+        sns.lineplot(data=df, x=x_col, y=y_col, marker='o')
+        plt.title(f"Line Plot of {y_col} over {x_col}")
+        plt.xlabel(x_col)
+        plt.ylabel(y_col)
+        plt.grid()
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.show()
     
 
 

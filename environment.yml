@@ -17,6 +17,8 @@ dependencies:
   - pyarrow
   - pip
   - notebook
+  - openpyxl
   - pip:
       - wbdata>=0.3
       - pycountry>=22.3.5
+      - pymoo
